@@ -2,7 +2,7 @@
 //!
 //! Run with `--release`. A number from a debug build is not a number.
 //!
-//!     cargo run -p imprenta-xlsx --example bench_memory --release -- 200000
+//!     cargo run -p imprenta-xlsx --example bench_memory_rows --release -- 200000
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::io::Cursor;
