@@ -145,6 +145,14 @@ jobs:
           npm install -g "pnpm@$version"
           pnpm --version
 
+      # The image comes with both Linux targets installed — for the toolchain it
+      # was built with. `rust-toolchain.toml` pins 1.94.0, so rustup fetches
+      # that one on first use and it arrives with the host target and nothing
+      # else. x86_64 therefore compiled and aarch64 died on
+      # `can't find crate for core`, which reads like a broken image and is
+      # really a second toolchain nobody asked for.
+      - run: rustup target add ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
           key: ${{ matrix.target }}
