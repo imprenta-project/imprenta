@@ -115,14 +115,32 @@ jobs:
       # else's, and refuses to read it until told this one is fine.
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      # Not corepack. The one baked into this image carries npm's old registry
-      # signing keys, and since those were rotated it dies on
-      # `Cannot find matching keyid` before it can fetch anything. The image
-      # tag is pinned, so that will not fix itself — and corepack is only ever
-      # a way to get the pnpm the repository already names.
+      # The image ships Node 20 and every package here says `engines: >=22`.
+      # It changes nothing about the addon — that comes out of rustc, and napi
+      # speaks the stable Node-API ABI, so the bytes are the same either way —
+      # but the other three jobs run 22, and a build driver that differs from
+      # the one everything was tested against is a difference waiting to
+      # matter. The image is glibc 2.35 and Node 22 wants 2.28, so it fits.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      # `/usr/bin/pnpm` in this image is not pnpm: it is a symlink to corepack's
+      # shim, and the corepack baked in carries npm's old registry signing keys.
+      # Since those were rotated it dies on `Cannot find matching keyid` before
+      # fetching anything, and the image tag is pinned — deliberately, it is
+      # what links the addons against an old enough glibc — so it will not fix
+      # itself. The shim also occupies the path, which is why installing over
+      # it fails with EEXIST.
+      #
+      # npm is the bootstrap and nothing more: no package manager can install
+      # itself before it exists, and npm is the one the image already has.
+      # Everything after this line is pnpm, at the version `packageManager`
+      # names, so there is still one source of truth for it.
       - name: Install pnpm
         run: |
           set -euo pipefail
+          rm -f /usr/bin/pnpm /usr/bin/pnpx
           version=$(node -p "require('./package.json').packageManager.split('@')[1]")
           npm install -g "pnpm@$version"
           pnpm --version
