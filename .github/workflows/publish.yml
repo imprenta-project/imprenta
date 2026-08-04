@@ -101,6 +101,13 @@ jobs:
     # cross toolchain so the arm build does not need a QEMU runner.
     container:
       image: ${{ matrix.image }}
+    # A container job defaults to `sh`, not to the `bash` a Linux runner gives
+    # you — and `sh` here is dash, which has no `pipefail`. Every script below
+    # opens with `set -euo pipefail`, so without this they exit 2 on the first
+    # line, before running anything and without printing why.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
