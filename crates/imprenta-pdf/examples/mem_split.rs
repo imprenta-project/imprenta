@@ -14,18 +14,40 @@ use imprenta_pdf::shape::Shaper;
 
 const ROBOTO: &[u8] = include_bytes!("../tests/fonts/Roboto-Regular.ttf");
 
-#[cfg(target_os = "macos")]
+/// Resident size right now, in megabytes.
+///
+/// **Current, not peak.** This example takes four readings to show *where* the
+/// memory goes, and a peak figure only ever climbs — every stage would report
+/// whatever the worst one reached and the split would say nothing. That is why
+/// this reads `VmRSS` and not the `VmHWM` that `mem_ir` wants.
+///
+/// No `cfg` on the function itself. It used to be gated to macOS and called
+/// unconditionally, which compiled on a Mac and failed to compile anywhere
+/// else — the whole example was unbuildable on Linux and nobody noticed until
+/// clippy ran there.
 fn rss_mb() -> f64 {
-    // Resident size via `ps`, which is enough for an order-of-magnitude split.
-    let out = std::process::Command::new("ps")
+    // Linux: the process says so itself, no subprocess needed.
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        for line in status.lines() {
+            if let Some(kb) = line.strip_prefix("VmRSS:") {
+                let kb: f64 = kb.trim().trim_end_matches(" kB").parse().unwrap_or(0.0);
+                return kb / 1024.0;
+            }
+        }
+    }
+    // macOS has no `/proc`. `ps` is enough for an order-of-magnitude split, and
+    // returning zero where there is neither beats panicking in an example.
+    std::process::Command::new("ps")
         .args(["-o", "rss=", "-p", &std::process::id().to_string()])
         .output()
-        .expect("ps");
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse::<f64>()
-        .unwrap_or(0.0)
-        / 1024.0
+        .ok()
+        .and_then(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<f64>()
+                .ok()
+        })
+        .map_or(0.0, |kb| kb / 1024.0)
 }
 
 fn main() {
