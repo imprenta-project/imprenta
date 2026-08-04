@@ -24,6 +24,9 @@
     "dist",
     "app/dist"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && vite build",
     "test": "vitest run",

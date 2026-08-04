@@ -15,6 +15,9 @@
     "index.d.ts",
     "dist"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "napi": {
     "binaryName": "imprenta-xlsx",
     "targets": [

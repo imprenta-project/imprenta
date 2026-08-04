@@ -36,6 +36,9 @@
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsup src/index.ts src/pdf/index.ts src/xlsx/index.ts src/any.ts --format esm,cjs --dts --clean",
     "test": "vitest run",
