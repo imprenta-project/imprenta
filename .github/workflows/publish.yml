@@ -11,6 +11,11 @@ name: Publish
 on:
   release:
     types: [published]
+  # A publish that failed halfway is the normal reason to be here: one matrix
+  # leg broke, nothing reached npm, and re-cutting a release to try again is a
+  # heavy way to retry a build. This runs the same jobs against a branch, and
+  # the version comes from `package.json` there exactly as it does from a tag.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -103,12 +108,17 @@ jobs:
       # else's, and refuses to read it until told this one is fine.
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Enable pnpm
+      # Not corepack. The one baked into this image carries npm's old registry
+      # signing keys, and since those were rotated it dies on
+      # `Cannot find matching keyid` before it can fetch anything. The image
+      # tag is pinned, so that will not fix itself — and corepack is only ever
+      # a way to get the pnpm the repository already names.
+      - name: Install pnpm
         run: |
-          corepack enable
-          corepack prepare --activate
-        env:
-          COREPACK_ENABLE_DOWNLOAD_PROMPT: 0
+          set -euo pipefail
+          version=$(node -p "require('./package.json').packageManager.split('@')[1]")
+          npm install -g "pnpm@$version"
+          pnpm --version
 
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
