@@ -1,0 +1,27 @@
+[package]
+name = "imprenta-pdf-napi"
+description = "Node bindings for the Imprenta PDF engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+imprenta-pdf = { path = "../imprenta-pdf" }
+imprenta-core.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+napi = { version = "3", features = ["napi4"] }
+napi-derive = "3"
+mimalloc = "0.1"
+
+[build-dependencies]
+napi-build = "2"

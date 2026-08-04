@@ -1,0 +1,14 @@
+{
+  "name": "facturacion",
+  "private": true,
+  "type": "module",
+  "description": "A project laid out the way one really would be, for trying the preview.",
+  "scripts": {
+    "dev": "imprenta dev"
+  },
+  "dependencies": {
+    "@imprentajs/cli": "workspace:*",
+    "@imprentajs/react": "workspace:*",
+    "react": "catalog:"
+  }
+}

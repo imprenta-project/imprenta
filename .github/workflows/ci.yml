@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  # Also on main itself. Work lands here directly as often as through a pull
+  # request, and a branch nobody checks is a branch that is red for a week.
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
+jobs:
+  ci:
+    # Skip the automated "chore: version packages" pull request. It carries
+    # nothing but version bumps and generated changelogs, written by changesets
+    # from commits that already passed CI here. A job skipped by `if` reports
+    # as successful to branch protection, so required checks still go green.
+    # `head_ref` is empty on a push, so this never skips anything else.
+    if: github.head_ref != 'changeset-release/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # No toolchain named here: `rust-toolchain.toml` pins 1.94.0 with rustfmt
+      # and clippy, and rustup reads it. Naming a version in this file too is
+      # how the two drift and how a clippy lint passes locally and fails here.
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # sccache caches individual crate compilations; rust-cache caches the
+      # registry and the index. They do different halves of the same job.
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          # The floor every package promises in `engines`, not the newest.
+          # Testing only on the newest is how a repository finds out from a
+          # user that it dropped support for the version it advertises.
+          node-version: "22"
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The Rust side first, because it is what the Node side is compiled from
+      # and a clippy failure is quicker to read than a failing napi build.
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+      # turbo: test, build, lint, format:check, check-types. `build` compiles
+      # both napi addons in release and the preview UI, so the Node tests run
+      # against this commit's engine rather than a stale `.node`.
+      - run: pnpm run ci

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Imprenta</title>
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <meta name="color-scheme" content="dark light" />
+    <script>
+      /* The mode, before the first paint. React settles this again on mount,
+         but by then the page has already been drawn once, and a preview that
+         flashes paper and then goes to ink is the thing every theme switcher
+         is judged by. `class="dark"` above is the default this agrees with. */
+      try {
+        const chosen = localStorage.getItem('imprenta.theme');
+        const ink =
+          chosen === 'system'
+            ? matchMedia('(prefers-color-scheme: dark)').matches
+            : chosen !== 'paper';
+        document.documentElement.classList.toggle('dark', ink);
+      } catch {
+        /* Storage can be denied outright, and ink is the default anyway. */
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "name": "backend",
+  "private": true,
+  "type": "module",
+  "description": "A controller: React in, PDF or XLSX bytes out, no CLI anywhere.",
+  "scripts": {
+    "start": "tsx server.ts"
+  },
+  "dependencies": {
+    "@imprentajs/fonts": "workspace:*",
+    "@imprentajs/pdf": "workspace:*",
+    "@imprentajs/react": "workspace:*",
+    "react": "catalog:",
+    "@imprentajs/xlsx": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "4.23.5"
+  }
+}

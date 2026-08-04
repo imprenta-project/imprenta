@@ -1,0 +1,264 @@
+name: Publish
+
+# Fifteen packages: the five in this repository, and the ten per-platform addon
+# packages that `@imprentajs/pdf` and `@imprentajs/xlsx` load at run time. The
+# generated `index.js` in each does `require('@imprentajs/pdf-darwin-arm64')` and
+# so on, so the `.node` files have to be compiled here — one per target, on a
+# machine that can produce that target — before anything can be published.
+#
+# npm only. Nothing here touches crates.io.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── The addons, one job per target ──────────────────────────────────────────
+
+  build-native:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-latest is arm64, so the Intel build is a cross-compile — but
+          # only in the sense that the target has to be installed. Apple's
+          # linker handles both from one toolchain.
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # `rust-toolchain.toml` decides the version; this only adds the target to
+      # it. Naming a toolchain here is how the two drift.
+      - run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          key: ${{ matrix.target }}
+
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build both addons
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm --filter @imprentajs/pdf exec napi build --platform --release \
+            --target ${{ matrix.target }} \
+            --manifest-path ../../crates/imprenta-pdf-napi/Cargo.toml --output-dir .
+          pnpm --filter @imprentajs/xlsx exec napi build --platform --release \
+            --target ${{ matrix.target }} \
+            --manifest-path ../../crates/imprenta-xlsx-napi/Cargo.toml --output-dir .
+
+          mkdir -p artifacts
+          cp packages/pdf/imprenta.*.node packages/xlsx/imprenta-xlsx.*.node artifacts/
+          ls -la artifacts
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bindings-${{ matrix.target }}
+          path: artifacts/*.node
+          if-no-files-found: error
+
+  build-linux:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            image: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian
+          - target: aarch64-unknown-linux-gnu
+            image: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian-aarch64
+    runs-on: ubuntu-latest
+    # Built inside napi-rs's own images, and this is not a convenience. A
+    # binary linked on ubuntu-latest needs glibc 2.39, which rules out Debian
+    # 12, Ubuntu 22.04 and every current `node:*-bookworm` container — that is
+    # to say, most of the machines a document engine actually runs on. These
+    # images link against an old enough glibc, and the aarch64 one carries the
+    # cross toolchain so the arm build does not need a QEMU runner.
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # The container runs as root over a checkout git considers someone
+      # else's, and refuses to read it until told this one is fine.
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare --activate
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: 0
+
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          key: ${{ matrix.target }}
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build both addons
+        run: |
+          set -euo pipefail
+          pnpm --filter @imprentajs/pdf exec napi build --platform --release \
+            --target ${{ matrix.target }} \
+            --manifest-path ../../crates/imprenta-pdf-napi/Cargo.toml --output-dir .
+          pnpm --filter @imprentajs/xlsx exec napi build --platform --release \
+            --target ${{ matrix.target }} \
+            --manifest-path ../../crates/imprenta-xlsx-napi/Cargo.toml --output-dir .
+
+          mkdir -p artifacts
+          cp packages/pdf/imprenta.*.node packages/xlsx/imprenta-xlsx.*.node artifacts/
+          ls -la artifacts
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bindings-${{ matrix.target }}
+          path: artifacts/*.node
+          if-no-files-found: error
+
+  # ── Everything to npm ───────────────────────────────────────────────────────
+
+  publish:
+    needs: [build-native, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Provenance. It requires `repository.url` in each package.json to name
+      # the repository this workflow is running in — they all say
+      # `imprenta-project/imprenta`, so publishing from a fork or from a repository
+      # under another owner will fail here rather than ship an unattested
+      # package.
+      id-token: write
+    env:
+      NPM_CONFIG_PROVENANCE: "true"
+    steps:
+      # A `release` event checks out the tag, which is the commit the version
+      # pull request produced. That is what the addons above were built from.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          registry-url: "https://registry.npmjs.org"
+
+      - run: pnpm install --frozen-lockfile
+
+      # Yes, this compiles the crates again, for this machine only. What it is
+      # really for is `index.js` and `index.d.ts`: napi writes them as a side
+      # effect of building, they are identical for every target, and they are
+      # the file that does the `require('@imprentajs/pdf-<platform>')`. Carrying
+      # them across from a matrix job as a separate artifact would save five
+      # minutes and add a way for the loader and the addons to disagree.
+      #
+      # It also builds `@imprentajs/react`, `@imprentajs/fonts` and the preview UI,
+      # all of which ship as compiled output.
+      - run: pnpm run build
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: bindings-*
+          merge-multiple: true
+          path: artifacts
+
+      - name: Sort the addons by which package they belong to
+        run: |
+          set -euo pipefail
+          ls -la artifacts
+
+          # Ten: five targets, two addons. Anything less means a matrix job
+          # failed quietly and a platform package would go out empty — which
+          # `napi pre-publish` also refuses, but this says so sooner and says
+          # which.
+          COUNT=$(ls artifacts/*.node | wc -l | tr -d ' ')
+          if [[ "$COUNT" != "10" ]]; then
+            echo "::error::Expected 10 addons, found $COUNT"
+            exit 1
+          fi
+
+          mkdir -p packages/pdf/artifacts packages/xlsx/artifacts
+          # The dot matters: `imprenta.*` does not match `imprenta-xlsx.*`.
+          mv artifacts/imprenta.*.node packages/pdf/artifacts/
+          mv artifacts/imprenta-xlsx.*.node packages/xlsx/artifacts/
+
+      - name: Stage the per-platform packages
+        run: |
+          set -euo pipefail
+          for pkg in pdf xlsx; do
+            cd "packages/$pkg"
+            # Generated rather than committed: everything in them is derived
+            # from this package.json and its `napi.targets`, and a committed
+            # copy is ten more files carrying a version that nothing bumps.
+            pnpm exec napi create-npm-dirs --npm-dir npm
+            # Note that this also drops a copy of every addon in the package
+            # root. Neither package lists `*.node` in `files`, so none of them
+            # ships inside the main package — which is the entire point of
+            # having per-platform packages. Do not add it back.
+            pnpm exec napi artifacts --output-dir artifacts --npm-dir npm
+            # Writes `optionalDependencies` into this package.json, and refuses
+            # outright if any platform package is missing its `.node`.
+            pnpm exec napi pre-publish --npm-dir npm --skip-optional-publish --tag-style npm
+            cd ../..
+          done
+
+          node -p "JSON.stringify(require('./packages/pdf/package.json').optionalDependencies, null, 2)"
+
+      # Cheap, and it catches the one mistake that is invisible until somebody
+      # installs: a 5 MB addon for one platform bundled inside the package that
+      # is supposed to choose between five of them.
+      - name: Refuse to ship an addon inside a main package
+        run: |
+          set -euo pipefail
+          for pkg in pdf xlsx; do
+            if npm pack --dry-run --json "./packages/$pkg" 2>/dev/null | grep -q '\.node"'; then
+              echo "::error::packages/$pkg would publish a .node file. Check its \`files\`."
+              exit 1
+            fi
+          done
+
+      - name: Publish the per-platform packages
+        run: |
+          set -euo pipefail
+          for dir in packages/pdf/npm/* packages/xlsx/npm/*; do
+            echo "publishing $dir"
+            npm publish "$dir" --tag next --access public
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Changesets shells out to `pnpm publish`, which is what replaces
+      # `workspace:*` with the exact version in the published tarball. Plain
+      # `npm publish` would ship the literal `workspace:*` and every install
+      # would fail.
+      #
+      # `--tag next` is explicit: in pre-release mode changesets would
+      # otherwise publish under the pre tag itself, `alpha`.
+      - name: Publish the five packages
+        run: pnpm release
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

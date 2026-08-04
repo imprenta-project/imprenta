@@ -1,0 +1,192 @@
+{
+  "page": {
+    "width": 595.28,
+    "height": 841.89,
+    "margin": { "top": 45, "right": 51, "bottom": 45, "left": 51 }
+  },
+  "accumulators": ["importe"],
+  "children": [
+    {
+      "t": "row",
+      "children": [
+        { "t": "image", "src": "logo", "width": 108 },
+        { "t": "box", "style": { "width": 120 } },
+        {
+          "t": "box",
+          "style": { "width": 200 },
+          "children": [
+            {
+              "t": "text",
+              "runs": [
+                {
+                  "text": "FACTURA",
+                  "weight": "bold",
+                  "color": { "r": 31, "g": 78, "b": 121, "a": 255 }
+                }
+              ],
+              "style": { "size": 20, "orphans": 1, "widows": 1 }
+            },
+            {
+              "t": "text",
+              "runs": [{ "text": "FV-2026-00418", "weight": "bold" }],
+              "style": { "size": 11, "orphans": 1, "widows": 1 }
+            },
+            {
+              "t": "text",
+              "runs": [{ "text": "Emitida el 2 de agosto de 2026" }],
+              "style": {
+                "size": 8.5,
+                "color": { "r": 122, "g": 122, "b": 122, "a": 255 },
+                "orphans": 1,
+                "widows": 1
+              }
+            }
+          ]
+        }
+      ]
+    },
+
+    { "t": "spacer", "height": 22 },
+
+    {
+      "t": "text",
+      "runs": [
+        { "text": "Este documento se ha declarado como " },
+        { "text": "JSON", "weight": "bold" },
+        {
+          "text": " y renderizado por el motor sin una línea de Rust por medio. El mismo IR lo puede producir React, Vue, Python o un fichero escrito a mano."
+        }
+      ],
+      "style": { "size": 9.5, "color": { "r": 42, "g": 42, "b": 42, "a": 255 }, "spaceAfter": 18 }
+    },
+
+    {
+      "t": "table",
+      "padding": { "top": 4, "right": 6, "bottom": 4, "left": 6 },
+      "columns": [
+        { "width": { "unit": "pt", "value": 40 } },
+        { "width": { "unit": "auto" }, "overflow": "ellipsis" },
+        { "width": { "unit": "pt", "value": 70 }, "align": "end" },
+        { "width": { "unit": "pt", "value": 80 }, "align": "end" }
+      ],
+      "header": {
+        "style": { "background": { "r": 31, "g": 78, "b": 121, "a": 255 } },
+        "cells": [
+          { "text": "Ref.", "weight": "bold", "color": { "r": 255, "g": 255, "b": 255, "a": 255 } },
+          {
+            "text": "Concepto",
+            "weight": "bold",
+            "color": { "r": 255, "g": 255, "b": 255, "a": 255 }
+          },
+          {
+            "text": "Precio",
+            "weight": "bold",
+            "color": { "r": 255, "g": 255, "b": 255, "a": 255 }
+          },
+          {
+            "text": "Importe",
+            "weight": "bold",
+            "color": { "r": 255, "g": 255, "b": 255, "a": 255 }
+          }
+        ]
+      },
+      "rows": [
+        {
+          "style": {
+            "border": {
+              "bottom": { "width": 0.4, "color": { "r": 220, "g": 230, "b": 245, "a": 255 } }
+            }
+          },
+          "cells": [
+            { "text": "001" },
+            { "text": "Licencia anual Imprenta Server, plan profesional" },
+            { "text": "1.200,00 €" },
+            { "text": "1.200,00 €" }
+          ],
+          "totals": [{ "accumulator": 0, "value": 1200 }]
+        },
+        {
+          "style": {
+            "background": { "r": 250, "g": 252, "b": 255, "a": 255 },
+            "border": {
+              "bottom": { "width": 0.4, "color": { "r": 220, "g": 230, "b": 245, "a": 255 } }
+            }
+          },
+          "cells": [
+            { "text": "002" },
+            { "text": "Implantación y migración de las plantillas existentes" },
+            { "text": "3.400,00 €" },
+            { "text": "3.400,00 €" }
+          ],
+          "totals": [{ "accumulator": 0, "value": 3400 }]
+        },
+        {
+          "style": {
+            "border": {
+              "bottom": { "width": 0.4, "color": { "r": 220, "g": 230, "b": 245, "a": 255 } }
+            }
+          },
+          "cells": [
+            { "text": "003" },
+            { "text": "Soporte prioritario 24×7, bolsa de 40 horas" },
+            { "text": "2.800,00 €" },
+            { "text": "2.800,00 €" }
+          ],
+          "totals": [{ "accumulator": 0, "value": 2800 }]
+        },
+        {
+          "style": {
+            "background": { "r": 238, "g": 242, "b": 255, "a": 255 },
+            "border": { "top": { "width": 1, "color": { "r": 31, "g": 78, "b": 121, "a": 255 } } }
+          },
+          "cells": [
+            { "text": "" },
+            {
+              "text": "TOTAL",
+              "weight": "bold",
+              "color": { "r": 31, "g": 78, "b": 121, "a": 255 }
+            },
+            { "text": "" },
+            {
+              "text": "7.400,00 €",
+              "weight": "bold",
+              "color": { "r": 31, "g": 78, "b": 121, "a": 255 }
+            }
+          ]
+        }
+      ],
+      "spaceAfter": 20
+    },
+
+    {
+      "t": "text",
+      "runs": [{ "text": "Condiciones", "weight": "bold" }],
+      "style": { "size": 11, "keepWithNext": true, "spaceAfter": 6 }
+    },
+    {
+      "t": "list",
+      "marker": { "kind": "decimal" },
+      "items": [
+        "Pago por transferencia en un plazo de treinta días desde la emisión.",
+        "El soporte prioritario se factura por bolsa y no es acumulable entre periodos.",
+        "La licencia se renueva tácitamente salvo aviso con un mes de antelación."
+      ],
+      "style": { "size": 9, "spaceAfter": 16 }
+    },
+
+    {
+      "t": "link",
+      "href": "https://imprenta.dev",
+      "child": {
+        "t": "text",
+        "runs": [
+          {
+            "text": "Condiciones completas en imprenta.dev",
+            "color": { "r": 14, "g": 124, "b": 134, "a": 255 }
+          }
+        ],
+        "style": { "size": 8.5, "orphans": 1, "widows": 1 }
+      }
+    }
+  ]
+}

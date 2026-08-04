@@ -1,0 +1,240 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/* Self-hosted, and not because of the network: a preview that fell back to a
+   system face would still look fine, and the one thing this tool sells is that
+   what you see is what the press gets. Geist carries text and figures, Spectral
+   is the display voice. Both come from the brand's own pairing. */
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+/* Latin only, and only Spectral. Geist carries everything the author typed —
+   file names, folder names, a diagnostic quoting their text — and a name in
+   Cyrillic that fell out of the face would be a face change in the middle of a
+   list. Spectral sets one word and two headings, all of them ours, so the
+   other seven subsets are 200 kB of a published package that nothing fetches. */
+@import "@fontsource/spectral/latin-400.css";
+@import "@fontsource/spectral/latin-600.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * The brand primitives.
+ *
+ * `static` rather than plain `@theme`, because Tailwind only emits the theme
+ * variables it can see used in a class name, and every one of these is used by
+ * a role below instead — `--background: var(--color-ink-1000)` is invisible to
+ * that scan, and the whole palette would come out empty.
+ *
+ * Authored in OKLCH and written here as the equivalent hex, so that the ramp
+ * stays readable next to the roles that consume it.
+ */
+@theme static {
+  /* Vermilion, hue 33 — the second pass of the press, the rubric red. It is
+     the brand, and 500 is the brand exactly. */
+  --color-vermilion-50: #ffefec;
+  --color-vermilion-100: #ffe1d9;
+  --color-vermilion-200: #ffc8ba;
+  --color-vermilion-300: #ffa08b;
+  --color-vermilion-400: #f77156;
+  --color-vermilion-500: #de4425;
+  --color-vermilion-600: #c13113;
+  --color-vermilion-700: #9b250c;
+  --color-vermilion-800: #731b0a;
+  --color-vermilion-900: #501308;
+  --color-vermilion-950: #300b05;
+
+  /* Ink, hue 60. Carbon black on paper reads warm; a true #000 beside warm
+     paper looks like a hole cut in the sheet rather than something printed. */
+  --color-ink-500: #9b948e;
+  --color-ink-600: #7a736d;
+  --color-ink-700: #5b544e;
+  --color-ink-800: #433b35;
+  --color-ink-900: #302823;
+  --color-ink-950: #201914;
+  --color-ink-1000: #130d09;
+
+  /* Paper, hue 85. Uncoated stock, not screen white. */
+  --color-paper-0: #f9f6f1;
+  --color-paper-50: #f1eee8;
+  --color-paper-100: #e8e4dd;
+  --color-paper-200: #d7d4cc;
+  --color-paper-300: #c1bdb5;
+  --color-paper-400: #a29e96;
+
+  /* Identical in both modes, deliberately: a warning does not change meaning
+     when somebody turns the lights on. */
+  --color-signal-good: #51af6f;
+  --color-signal-warn: #e1a035;
+  --color-signal-info: #609fd2;
+
+  --font-sans: "Geist Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-display: "Spectral", Georgia, "Times New Roman", serif;
+}
+
+@theme inline {
+  --font-heading: var(--font-display);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+
+  /* Not a shadcn role, and the only one this product had to add. Everything
+     else on screen is chrome and follows the theme; the sheet is the artefact
+     and is paper in both modes, because that is what it will be printed on. */
+  --color-sheet: var(--sheet);
+  --color-sheet-foreground: var(--sheet-foreground);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/*
+ * The semantic roles.
+ *
+ * Both modes are real here. Imprenta's output is a printed sheet, so paper is
+ * not a courtesy for people who dislike dark UIs — it is the medium. Ink is the
+ * default anyway, because this window sits open beside an editor and because a
+ * page only reads as a page when what surrounds it is not one.
+ *
+ * `brand.primary` is the same vermilion in both. What moves is the vermilion
+ * used AS type, which has to lift off ink and drop onto paper to stay legible:
+ * that is `--destructive` here, and the ring.
+ */
+:root {
+  color-scheme: light;
+
+  --background: var(--color-paper-0);
+  --foreground: var(--color-ink-1000);
+  --card: var(--color-paper-0);
+  --card-foreground: var(--color-ink-1000);
+  --popover: var(--color-paper-0);
+  --popover-foreground: var(--color-ink-1000);
+  --primary: var(--color-vermilion-500);
+  --primary-foreground: var(--color-paper-0);
+  --secondary: var(--color-paper-100);
+  --secondary-foreground: var(--color-ink-1000);
+  --muted: var(--color-paper-100);
+  --muted-foreground: var(--color-ink-700);
+  --accent: var(--color-paper-100);
+  --accent-foreground: var(--color-ink-1000);
+  --destructive: var(--color-vermilion-600);
+  --border: var(--color-paper-200);
+  --input: var(--color-paper-300);
+  --ring: var(--color-vermilion-500);
+
+  --sheet: var(--color-paper-0);
+  --sheet-foreground: var(--color-ink-1000);
+
+  /* 8px, the brand's `radius.md`. A poster can afford 24; a tool this dense
+     cannot, and the ramp above derives the rest from it. */
+  --radius: 0.5rem;
+
+  --chart-1: var(--color-vermilion-500);
+  --chart-2: var(--color-vermilion-300);
+  --chart-3: var(--color-ink-600);
+  --chart-4: var(--color-ink-800);
+  --chart-5: var(--color-paper-300);
+
+  --sidebar: var(--color-paper-50);
+  --sidebar-foreground: var(--color-ink-1000);
+  --sidebar-primary: var(--color-vermilion-500);
+  --sidebar-primary-foreground: var(--color-paper-0);
+  --sidebar-accent: var(--color-paper-100);
+  --sidebar-accent-foreground: var(--color-ink-1000);
+  --sidebar-border: var(--color-paper-200);
+  --sidebar-ring: var(--color-vermilion-500);
+}
+
+.dark {
+  color-scheme: dark;
+
+  --background: var(--color-ink-1000);
+  --foreground: var(--color-paper-0);
+  /* ink-950, which the brandbook has as a primitive but never needed a role
+     for: a banner has a canvas and a raised surface and that is enough. A
+     panelled UI needs the step in between, or the sidebar and the card sit at
+     the same value as their own borders. */
+  --card: var(--color-ink-950);
+  --card-foreground: var(--color-paper-0);
+  --popover: var(--color-ink-950);
+  --popover-foreground: var(--color-paper-0);
+  --primary: var(--color-vermilion-500);
+  --primary-foreground: var(--color-paper-0);
+  --secondary: var(--color-ink-900);
+  --secondary-foreground: var(--color-paper-0);
+  --muted: var(--color-ink-900);
+  --muted-foreground: var(--color-paper-400);
+  --accent: var(--color-ink-900);
+  --accent-foreground: var(--color-paper-0);
+  --destructive: var(--color-vermilion-400);
+  --border: var(--color-ink-900);
+  --input: var(--color-ink-800);
+  --ring: var(--color-vermilion-700);
+
+  --sidebar: var(--color-ink-950);
+  --sidebar-foreground: var(--color-paper-0);
+  --sidebar-primary: var(--color-vermilion-500);
+  --sidebar-primary-foreground: var(--color-paper-0);
+  --sidebar-accent: var(--color-ink-900);
+  --sidebar-accent-foreground: var(--color-paper-0);
+  --sidebar-border: var(--color-ink-900);
+  --sidebar-ring: var(--color-vermilion-700);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    @apply h-full font-sans;
+  }
+
+  body {
+    @apply h-full bg-background text-foreground antialiased;
+  }
+
+  #root {
+    @apply h-full;
+  }
+
+  /* The numbers are the argument, and a column of them that does not line up
+     is a column nobody reads. Every figure on this screen is tabular. */
+  body {
+    font-variant-numeric: tabular-nums;
+  }
+}

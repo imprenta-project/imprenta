@@ -1,0 +1,17 @@
+[package]
+name = "imprenta-core"
+description = "Format-neutral primitives shared by every Imprenta output format: units, colour, the neutral style vocabulary, diagnostics, and the IR envelope."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

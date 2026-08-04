@@ -1,0 +1,333 @@
+import { describe, expect, it } from 'vitest';
+import { Theme } from '../src/element.js';
+import { Cell, Column, Row, Sheet, Workbook } from '../src/xlsx/elements.js';
+import type { IrWorkbook } from '../src/xlsx/ir.js';
+import { toWorkbook } from '../src/xlsx/render.js';
+
+const first = (book: IrWorkbook) => book.sheets[0];
+const cells = (book: IrWorkbook, row = 0) => first(book).rows?.[row]?.cells ?? [];
+
+describe('a workbook', () => {
+  it('keeps its sheets in the order they were written', async () => {
+    const book = await toWorkbook(
+      <Workbook>
+        <Sheet name="Ventas" />
+        <Sheet name="Resumen" />
+      </Workbook>,
+    );
+
+    expect(book.sheets.map((s) => s.name)).toEqual(['Ventas', 'Resumen']);
+  });
+
+  it('refuses two tabs with the same name', async () => {
+    // Excel will not open it, and what it says names neither of them.
+    await expect(
+      toWorkbook(
+        <Workbook>
+          <Sheet name="Ventas" />
+          <Sheet name="ventas" />
+        </Workbook>,
+      ),
+    ).rejects.toThrow(/two sheets are called/);
+  });
+
+  it('refuses a tab name longer than Excel allows', async () => {
+    await expect(
+      toWorkbook(
+        <Workbook>
+          <Sheet name={'x'.repeat(32)} />
+        </Workbook>,
+      ),
+    ).rejects.toThrow(/32 characters, and Excel allows 31/);
+  });
+
+  it('refuses a character Excel forbids on a tab', async () => {
+    await expect(
+      toWorkbook(
+        <Workbook>
+          <Sheet name="Ventas/2026" />
+        </Workbook>,
+      ),
+    ).rejects.toThrow(/forbids on a tab/);
+  });
+
+  it('needs at least one sheet', async () => {
+    await expect(toWorkbook(<Workbook />)).rejects.toThrow(/at least one <Sheet>/);
+  });
+});
+
+describe('what is in a cell, and what type it is', () => {
+  it('keeps text as text, leading zeros and all', async () => {
+    // The reason children are always text: a reference like 007 is not seven.
+    const book = await toWorkbook(
+      <Workbook>
+        <Sheet name="H">
+          <Row>
+            <Cell>007</Cell>
+          </Row>
+        </Sheet>
+      </Workbook>,
+    );
+
+    expect(cells(book)[0].value).toEqual({ t: 'text', v: '007' });
+  });
+
+  it('carries a number through as a number', async () => {
+    // The whole difference from a printed page. Written as text, SUM returns
+    // zero and the recipient gets a total that is wrong.
+    const book = await toWorkbook(
+      <Workbook>
+        <Sheet name="H">
+          <Row>
+            <Cell value={1200} />
+            <Cell value={-125.25} />
+          </Row>
+        </Sheet>
+      </Workbook>,
+    );
+
+    expect(cells(book)[0].value).toEqual({ t: 'number', v: 1200 });
+    expect(cells(book)[1].value).toEqual({ t: 'number', v: -125.25 });
+  });
+
+  it('tells a boolean from the word', async () => {
+    const book = await toWorkbook(
+      <Workbook>
+        <Sheet name="H">
+          <Row>
+            <Cell value={true} />
+            <Cell>true</Cell>
+          </Row>
+        </Sheet>
+      </Workbook>,
+    );
+
+    expect(cells(book)[0].value).toEqual({ t: 'bool', v: true });
+    expect(cells(book)[1].value).toEqual({ t: 'text', v: 'true' });
+  });
+
+  it('turns a Date into the serial Excel keeps underneath one', async () => {
+    // 2026-08-03 is 46237, which is the number the Rust side arrives at from
+    // the calendar. The two agreeing is the point.
+    const book = await toWorkbook(
+      <Workbook>
+        <Sheet name="H">
+          <Row>
+            <Cell value={new Date(Date.UTC(2026, 7, 3))} />
+          </Row>
+        </Sheet>
+      </Workbook>,
+    );
+
+    expect(cells(book)[0].value).toEqual({ t: 'date', v: 46237 });
+  });
+
+  it('puts a time of day after the point', async () => {
+    const book = await toWorkbook(
+      <Workbook>
+        <Sheet name="H">
+          <Row>
+            <Cell value={new Date(Date.UTC(2026, 7, 3, 12))} />
+          </Row>
+        </Sheet>
+      </Workbook>,
+    );
+
+    expect(cells(book)[0].value).toEqual({ t: 'date', v: 46237.5 });
+  });
+
+  it('is blank when there is nothing in it', async () => {
+    const book = await toWorkbook(
+      <Workbook>
+        <Sheet name="H">
+          <Row>
+            <Cell />
+          </Row>
+        </Sheet>
+      </Workbook>,
+    );
+
+    expect(cells(book)[0].value).toEqual({ t: 'blank' });
+  });
+
+  it('takes a formula, with or without the equals sign', async () => {
+    const book = await toWorkbook(
+      <Workbook>
+        <Sheet name="H">
+          <Row>
+            <Cell formula="SUM(A1:A9)" cached={42} />
+          </Row>
+        </Sheet>
+      </Workbook>,
+    );
+
+    expect(cells(book)[0].value).toEqual({
+      t: 'formula',
+      v: { formula: 'SUM(A1:A9)', cached: 42 },
+    });
+  });
+
+  it('refuses a cell given both a value and a formula', async () => {
+    await expect(
+      toWorkbook(
+        <Workbook>
+          <Sheet name="H">
+            <Row>
+              <Cell value={1} formula="SUM(A1:A9)" />
+            </Row>
+          </Sheet>
+        </Workbook>,
+      ),
+    ).rejects.toThrow(/a value or a formula/);
+  });
+
+  it('refuses a number a spreadsheet cannot hold', async () => {
+    // Infinity has no representation in the file. Writing it makes Excel
+    // refuse the whole workbook for the sake of one cell.
+    await expect(
+      toWorkbook(
+        <Workbook>
+          <Sheet name="H">
+            <Row>
+              <Cell value={1 / 0} />
+            </Row>
+          </Sheet>
+        </Workbook>,
+      ),
+    ).rejects.toThrow(/cannot hold/);
+  });
+});
+
+describe('the shape of a sheet', () => {
+  it('takes column widths, before the rows', async () => {
+    const book = await toWorkbook(
+      <Workbook>
+        <Sheet name="H">
+          <Column width={12} />
+          <Column width={40} format="#,##0.00" />
+          <Row>
+            <Cell>a</Cell>
+          </Row>
+        </Sheet>
+      </Workbook>,
+    );
+
+    expect(first(book).columns).toEqual([
+      { width: 12 },
+      { width: 40, style: { format: '#,##0.00' } },
+    ]);
+  });
+
+  it('says so when a column comes after a row', async () => {
+    // Excel writes the columns before the data, and an author who put one
+    // half way down has almost certainly mistaken it for a cell.
+    await expect(
+      toWorkbook(
+        <Workbook>
+          <Sheet name="H">
+            <Row>
+              <Cell>a</Cell>
+            </Row>
+            <Column width={12} />
+          </Sheet>
+        </Workbook>,
+      ),
+    ).rejects.toThrow(/columns come first/);
+  });
+
+  it('turns a colSpan into a merge and keeps the columns after it straight', async () => {
+    const book = await toWorkbook(
+      <Workbook>
+        <Sheet name="H">
+          <Row>
+            <Cell colSpan={3}>Total</Cell>
+            <Cell value={99} />
+          </Row>
+        </Sheet>
+      </Workbook>,
+    );
+
+    expect(first(book).merges).toEqual([{ fromRow: 0, fromColumn: 0, toRow: 0, toColumn: 2 }]);
+    // The number has to land in D, not in B.
+    expect(cells(book)).toHaveLength(4);
+    expect(cells(book)[3].value).toEqual({ t: 'number', v: 99 });
+  });
+
+  it('freezes the rows it was asked to', async () => {
+    const book = await toWorkbook(
+      <Workbook>
+        <Sheet name="H" freeze={{ rows: 1 }} />
+      </Workbook>,
+    );
+
+    expect(first(book).freeze).toEqual({ rows: 1 });
+  });
+});
+
+describe('formatting', () => {
+  it('resolves classes on a cell, a row and a column', async () => {
+    const book = await toWorkbook(
+      <Workbook>
+        <Sheet name="H">
+          <Row className="bg-slate-100 font-bold">
+            <Cell className="text-right">Importe</Cell>
+          </Row>
+        </Sheet>
+      </Workbook>,
+    );
+
+    expect(first(book).rows?.[0].style).toEqual({
+      fill: '#f1f5f9',
+      font: { bold: true },
+    });
+    expect(cells(book)[0].style).toEqual({ align: { horizontal: 'right' } });
+  });
+
+  it('takes a theme wrapped round the whole workbook', async () => {
+    const book = await toWorkbook(
+      <Theme colors={{ brand: '#1b3a5c' }}>
+        <Workbook>
+          <Sheet name="H">
+            <Row>
+              <Cell className="text-brand">Hola</Cell>
+            </Row>
+          </Sheet>
+        </Workbook>
+      </Theme>,
+    );
+
+    expect(cells(book)[0].style?.font?.color).toBe('#1b3a5c');
+  });
+
+  it('says which class it could not use', async () => {
+    await expect(
+      toWorkbook(
+        <Workbook>
+          <Sheet name="H">
+            <Row>
+              <Cell className="p-4">Hola</Cell>
+            </Row>
+          </Sheet>
+        </Workbook>,
+      ),
+    ).rejects.toThrow(/no padding or margin/);
+  });
+
+  it('lets a component throw all the way to the caller', async () => {
+    // React's own habit is to log and commit a tree with a hole in it, which
+    // is right for a screen and wrong for a file nobody opens until later.
+    const Broken = () => {
+      throw new Error('the rows could not be loaded');
+    };
+
+    await expect(
+      toWorkbook(
+        <Workbook>
+          <Sheet name="H">
+            <Broken />
+          </Sheet>
+        </Workbook>,
+      ),
+    ).rejects.toThrow(/the rows could not be loaded/);
+  });
+});

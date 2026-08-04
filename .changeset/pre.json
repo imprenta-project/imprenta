@@ -1,0 +1,12 @@
+{
+  "mode": "pre",
+  "tag": "alpha",
+  "initialVersions": {
+    "@imprentajs/cli": "0.0.0",
+    "@imprentajs/fonts": "0.0.0",
+    "@imprentajs/pdf": "0.0.0",
+    "@imprentajs/react": "0.0.0",
+    "@imprentajs/xlsx": "0.0.0"
+  },
+  "changesets": []
+}

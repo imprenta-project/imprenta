@@ -1,0 +1,6 @@
+*.node
+index.js
+index.d.ts
+dist
+npm
+artifacts

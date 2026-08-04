@@ -1,0 +1,145 @@
+name: Release
+
+# Two phases, and which one runs is decided by whether there are changesets
+# waiting.
+#
+#   1. Something lands on main carrying a changeset. This opens (or updates)
+#      a pull request called "chore: version packages" that bumps the five
+#      packages and writes their changelogs. Nothing is published.
+#   2. That pull request is merged. This run finds no changesets pending, so it
+#      tags the commit and cuts the GitHub release — which is what `publish.yml`
+#      waits for.
+#
+# The detection is `scripts/pending-changesets.mjs` and not a file count, for a
+# reason worth knowing before touching it: in pre-release mode `changeset
+# version` leaves the changeset files on disk. Counting them would sit at "yes,
+# there are changesets" forever and phase 2 would never happen.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  # Never cancelled. A half-run release is a tag without a release, or a
+  # version bump nobody published.
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # The whole history: changesets reads tags, and the release notes are
+          # cut from a changelog this commit may have only just written.
+          fetch-depth: 0
+          # A personal token rather than GITHUB_TOKEN, because a pull request
+          # opened with GITHUB_TOKEN does not trigger workflows — the version
+          # pull request would sit there with no checks on it forever.
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      # No Rust here. This job versions and tags; nothing it does compiles a
+      # crate. The engine is built in `publish.yml`, once per target.
+      - run: pnpm install --frozen-lockfile
+
+      - name: Are there changesets pending?
+        id: pending
+        run: node scripts/pending-changesets.mjs
+
+      # ── Phase 1 ────────────────────────────────────────────────────────────
+      # Nothing reviews this pull request. It carries only version bumps and
+      # generated changelogs, written by changesets from commits that were
+      # already reviewed on their own. `ci.yml` skips the `changeset-release/
+      # main` head branch for the same reason.
+      - name: Open the version pull request
+        if: steps.pending.outputs.pending == 'true'
+        uses: changesets/action@6a0a831ff30acef54f2c6aa1cbbc1096b066edaf # v1.7.0
+        with:
+          version: pnpm version-packages
+          title: "chore: version packages"
+          commit: "chore: version packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+
+      # ── Phase 2 ────────────────────────────────────────────────────────────
+      - name: Cut the release
+        if: steps.pending.outputs.pending == 'false'
+        run: |
+          set -euo pipefail
+
+          VERSION=$(node -p "require('./packages/cli/package.json').version")
+          TAG="v$VERSION"
+
+          if git tag -l | grep -qx "$TAG"; then
+            echo "Tag $TAG already exists, nothing to release"
+            exit 0
+          fi
+
+          # The five packages are a `fixed` group in .changeset/config.json, so
+          # one tag stands for all of them. If they ever drift, that tag is a
+          # lie about what the other four contain — and `@imprentajs/cli` shipping
+          # against a `@imprentajs/pdf` it was never tested with is the exact
+          # failure this repository is careful about.
+          for pkg in packages/pdf packages/xlsx packages/react packages/fonts; do
+            PKG_VERSION=$(node -p "require('./$pkg/package.json').version")
+            if [[ "$PKG_VERSION" != "$VERSION" ]]; then
+              echo "::error::$pkg is at $PKG_VERSION but the release is $VERSION."
+              echo "::error::The fixed group in .changeset/config.json is out of sync."
+              exit 1
+            fi
+          done
+
+          # Everything with a `-` in it is a pre-release: GitHub must mark it as
+          # one, and it must not become "latest". That is the whole point of
+          # shipping alphas — nobody gets one without asking for it.
+          PRERELEASE_ARGS=(--latest)
+          if [[ "$VERSION" == *-* ]]; then
+            PRERELEASE_ARGS=(--prerelease --latest=false)
+          fi
+
+          # The changelog changesets just wrote for the CLI, which is the
+          # package a reader of the release is most likely to be installing.
+          NOTES_FILE=$(mktemp)
+          awk -v v="$VERSION" '$0=="## "v{f=1;next} f&&/^## /{exit} f' \
+            packages/cli/CHANGELOG.md > "$NOTES_FILE" || true
+
+          {
+            echo
+            echo "## Packages"
+            echo
+            echo "\`@imprentajs/cli\`, \`@imprentajs/react\`, \`@imprentajs/fonts\`,"
+            echo "\`@imprentajs/pdf\` and \`@imprentajs/xlsx\` at \`$VERSION\` on npm,"
+            echo "together with the ten per-platform addon packages."
+            echo
+            if [[ "$VERSION" == *-* ]]; then
+              echo "Published under the \`next\` dist-tag:"
+              echo
+              echo '```'
+              echo "npm i @imprentajs/cli@next"
+              echo '```'
+            fi
+          } >> "$NOTES_FILE"
+
+          # --target makes the API create the tag along with the release, so a
+          # failed call leaves no orphaned ref and the next run retries cleanly.
+          # Tagging first would strand the tag, and the guard above would then
+          # read it as "already released" and skip forever.
+          gh release create "$TAG" \
+            --target "${{ github.sha }}" \
+            --title "Imprenta $TAG" \
+            --notes-file "$NOTES_FILE" \
+            --generate-notes \
+            "${PRERELEASE_ARGS[@]}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}

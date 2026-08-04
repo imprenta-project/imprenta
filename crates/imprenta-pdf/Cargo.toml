@@ -1,0 +1,18 @@
+[package]
+name = "imprenta-pdf"
+description = "The Imprenta PDF engine: measure, pack, paint."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+imprenta-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+parley.workspace = true
+krilla.workspace = true
+rayon.workspace = true
+thiserror.workspace = true

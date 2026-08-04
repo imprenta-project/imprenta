@@ -1,0 +1,35 @@
+packages:
+  - packages/*
+  - apps/*
+  - examples/*
+
+# Single source of truth for versions shared across packages.
+#
+# Exact, like everything else here — see `.npmrc`. A `catalog:` reference is
+# how a package asks for one of these, so pinning them here is what makes the
+# packages' own versions exact too; writing the number into a package instead
+# would give one file an exact version and the other six a different one.
+catalog:
+  react: 19.2.8
+  react-dom: 19.2.8
+  "@types/react": 19.2.18
+
+  # NOT the newest, and for a reason in each case.
+  #
+  # `@types/node` tracks a Node major, and every package here says
+  # `engines: node >= 22`. Typing against 26 would let a Node 26 API through
+  # the type check and break for the users we promised to support — the number
+  # is a statement about the runtime floor, not a library to keep current.
+  "@types/node": 22.20.1
+
+  # TypeScript 6 and 7 both fail `tsup --dts`: the dts step runs
+  # `rollup-plugin-dts`, which sets `baseUrl` itself, and 6 makes that a hard
+  # error (TS5101) while 7 changes the compiler API it calls
+  # (`useCaseSensitiveFileNames` is gone). `@imprentajs/react` and
+  # `@imprentajs/fonts` both build their declarations that way, so 5.9.3 is the
+  # newest this repository can actually use. Revisit when tsup ships a dts
+  # step that speaks TS 7.
+  typescript: 5.9.3
+
+  tsup: 8.5.1
+  vitest: 4.1.10

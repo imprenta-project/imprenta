@@ -1,0 +1,37 @@
+{
+  "$schema": "https://turborepo.dev/schema.json",
+  "ui": "tui",
+  "globalDependencies": ["biome.json", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "src/**", "Cargo.toml", "../../crates/**"],
+      "outputs": ["dist/**", "app/dist/**", "index.js", "index.d.ts", "*.node"]
+    },
+    "test": {
+      "dependsOn": ["^build", "build"],
+      "inputs": ["$TURBO_DEFAULT$", "src/**", "tests/**", "Cargo.toml"]
+    },
+    "lint": {
+      "dependsOn": ["^build"]
+    },
+    "check-types": {
+      "dependsOn": ["^build", "build"]
+    },
+    "format": {
+      "cache": false
+    },
+    "format:check": {},
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "clean": {
+      "cache": false
+    },
+    "bench": {
+      "dependsOn": ["build"],
+      "cache": false
+    }
+  }
+}
