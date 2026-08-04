@@ -30,9 +30,9 @@ never sees them and must not: there is nothing to write a release note about in
 a file that is one compiled `.node`.
 
 **We are in pre-release.** `pre.json` says `alpha`, so `changeset version`
-produces `0.1.0-alpha.N` and the release workflow publishes it under the `next`
-dist-tag — `npm i @imprentajs/cli` does not get it, `npm i @imprentajs/cli@next`
-does. Leaving pre-release is one command and a deliberate act:
+produces `0.1.0-alpha.N` and the release publishes under the `alpha` dist-tag.
+Not a custom one: changesets refuses `--tag` in pre mode outright. Leaving
+pre-release is one command and a deliberate act:
 
 ```bash
 pnpm exec changeset pre exit

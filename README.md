@@ -2,10 +2,11 @@
 
 **Document engine in Rust, authored in React.** PDF and XLSX; DOCX to follow.
 
-> Status: **alpha.** Published under the `next` dist-tag, which is why every
-> install below carries it: `npm i @imprentajs/cli` deliberately gets you nothing.
-> The engine works and is built test-first, but the API is not settled and a
-> minor version may move it.
+> Status: **alpha.** Published under the `alpha` dist-tag, which is what the
+> installs below ask for. npm gives a package's very first version the `latest`
+> tag as well, so a plain install resolves to the same thing today — that stops
+> being true the moment a stable release exists. The engine works and is built
+> test-first, but the API is not settled and a minor version may move it.
 
 [Why](#why) · [Measured](#measured) · [Authoring](#authoring) · [Printing](#printing) ·
 [Spreadsheets](#spreadsheets) · [The preview](#the-preview) · [Development](#development)
@@ -15,12 +16,12 @@
 ## Quick start
 
 ```bash
-npm i @imprentajs/react@next @imprentajs/pdf@next   # print from a server
-npm i @imprentajs/xlsx@next                         # …or export a spreadsheet
-npm i -D @imprentajs/cli@next                       # preview as you write
+npm i @imprentajs/react@alpha @imprentajs/pdf@alpha   # print from a server
+npm i @imprentajs/xlsx@alpha                          # …or export a spreadsheet
+npm i -D @imprentajs/cli@alpha                        # preview as you write
 
-npx imprenta init                                   # a project that renders straight away
-npx imprenta dev                                    # open the preview
+npx imprenta init                                     # a project that renders straight away
+npx imprenta dev                                      # open the preview
 ```
 
 `init` writes `imprenta.config.ts`, a `documents/` folder with a working

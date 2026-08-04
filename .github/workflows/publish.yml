@@ -283,12 +283,23 @@ jobs:
             fi
           done
 
+      # Skipping what is already there rather than failing on it, because a
+      # half-finished publish is the failure this job actually has: the ten
+      # addons went out, the five packages did not, and a version cannot be
+      # published twice. Rerunning has to be able to finish the job rather
+      # than trip over its own first half.
       - name: Publish the per-platform packages
         run: |
           set -euo pipefail
           for dir in packages/pdf/npm/* packages/xlsx/npm/*; do
-            echo "publishing $dir"
-            npm publish "$dir" --tag next --access public
+            name=$(node -p "require('./$dir/package.json').name")
+            version=$(node -p "require('./$dir/package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already published, skipping"
+              continue
+            fi
+            echo "publishing $name@$version"
+            npm publish "$dir" --tag alpha --access public
           done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -296,10 +307,13 @@ jobs:
       # Changesets shells out to `pnpm publish`, which is what replaces
       # `workspace:*` with the exact version in the published tarball. Plain
       # `npm publish` would ship the literal `workspace:*` and every install
-      # would fail.
+      # would fail. It also skips versions already on the registry, so this is
+      # safe to rerun.
       #
-      # `--tag next` is explicit: in pre-release mode changesets would
-      # otherwise publish under the pre tag itself, `alpha`.
+      # No `--tag`: changesets refuses one in pre-release mode — "Releasing
+      # under custom tag is not allowed in pre mode" — and publishes under the
+      # pre tag itself, which is `alpha`. That is why the addons above use the
+      # same word.
       - name: Publish the five packages
         run: pnpm release
         env:

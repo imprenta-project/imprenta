@@ -18,7 +18,7 @@
     "ci": "turbo run test build lint format:check check-types",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release": "changeset publish --tag next"
+    "release": "changeset publish"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.6",

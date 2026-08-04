@@ -243,9 +243,10 @@ packages going to npm.
 - **The five share one version**, as a `fixed` group. A `@imprentajs/cli` that
   shipped against a `@imprentajs/pdf` it was never tested with is the failure
   this repository is most careful about.
-- **We are in pre-release**, tag `alpha`, published as `next`. So
-  `npm i @imprentajs/cli` gets nothing and `npm i @imprentajs/cli@next` gets this.
-  Leaving pre-release is `changeset pre exit`, deliberately.
+- **We are in pre-release**, tag `alpha`, and that is also the dist-tag.
+  Changesets refuses a custom one in pre mode — "Releasing under custom tag is
+  not allowed in pre mode" — so do not add `--tag` to `release`. Leaving
+  pre-release is `changeset pre exit`, deliberately.
 - **Do not count `.changeset/*.md` to work out which phase a release is in.**
   In pre-release `changeset version` leaves them on disk. That is what
   `scripts/pending-changesets.mjs` is for, and the comment in it says why.

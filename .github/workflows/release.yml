@@ -123,10 +123,10 @@ jobs:
             echo "together with the ten per-platform addon packages."
             echo
             if [[ "$VERSION" == *-* ]]; then
-              echo "Published under the \`next\` dist-tag:"
+              echo "Published under the \`alpha\` dist-tag:"
               echo
               echo '```'
-              echo "npm i @imprentajs/cli@next"
+              echo "npm i @imprentajs/cli@alpha"
               echo '```'
             fi
           } >> "$NOTES_FILE"
