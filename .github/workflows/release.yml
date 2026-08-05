@@ -118,9 +118,17 @@ jobs:
             echo
             echo "## Packages"
             echo
+            # Five, and no more. The ten per-platform addon packages this used
+            # to promise went with the native addons, but the sentence naming
+            # them survived the migration and shipped once — a release note
+            # sending people to look for packages that do not exist, on the one
+            # page a stranger reads before installing anything.
             echo "\`@imprentajs/cli\`, \`@imprentajs/react\`, \`@imprentajs/fonts\`,"
-            echo "\`@imprentajs/pdf\` and \`@imprentajs/xlsx\` at \`$VERSION\` on npm,"
-            echo "together with the ten per-platform addon packages."
+            echo "\`@imprentajs/pdf\` and \`@imprentajs/xlsx\` at \`$VERSION\` on npm."
+            echo
+            echo "Five packages and nothing per-platform: each engine is a single"
+            echo "WebAssembly module, so one artefact runs wherever Node does —"
+            echo "glibc, musl, Alpine, a browser, Deno, Bun or an edge worker."
             echo
             if [[ "$VERSION" == *-* ]]; then
               echo "Published under the \`alpha\` dist-tag:"
