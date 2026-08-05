@@ -61,10 +61,11 @@ export interface TextProps extends Styled {
   /**
    * Which edge of its box the lines are set against.
    *
-   * The same three words a table column takes, so that an amount under a
-   * table lines up with the amounts in it.
+   * The same words a table column takes, so that an amount under a table
+   * lines up with the amounts in it. `justify` is the odd one: nothing moves,
+   * the spaces widen until every line but the last reaches the far edge.
    */
-  align?: 'start' | 'end' | 'center';
+  align?: 'start' | 'end' | 'center' | 'justify';
   /** Minimum lines carried to the top of a page. */
   widows?: number;
   /** Minimum lines left at the foot of one. */

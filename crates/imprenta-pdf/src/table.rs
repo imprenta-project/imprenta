@@ -40,6 +40,10 @@ pub enum Align {
     Start,
     End,
     Center,
+    /// Spaces widened rather than the line moved. It shifts nothing, so
+    /// [`offset_within`] treats it as `Start`; the widening happens where the
+    /// lines are built.
+    Justify,
 }
 
 /// What a cell does when its content is wider than its column.
@@ -137,7 +141,7 @@ pub fn offset_within(track: Track, content_width: Pt, align: Align) -> Pt {
     // right, into empty space, rather than to the left over its neighbour.
     let slack = (track.width.get() - content_width.get()).max(0.0);
     let shift = match align {
-        Align::Start => 0.0,
+        Align::Start | Align::Justify => 0.0,
         Align::End => slack,
         Align::Center => slack / 2.0,
     };

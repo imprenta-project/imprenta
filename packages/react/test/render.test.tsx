@@ -209,6 +209,24 @@ describe('alignment', () => {
     // carries what was asked for, not what was defaulted.
     expect(styleOf(2)?.align).toBeUndefined();
   });
+
+  it('justifies a paragraph when asked, by the prop or by the class', async () => {
+    // Justification is not a fourth direction to shove the line in: the line
+    // stays where it is and its spaces grow. It reaches the engine as a word
+    // like the others, though, so this is the same journey and the same test.
+    const document = await toDocument(
+      <Document>
+        <Text align="justify">por la prop</Text>
+        <Text className="text-justify">por la clase</Text>
+      </Document>,
+    );
+
+    const styleOf = (at: number) =>
+      (document.children[at] as unknown as { style?: { align?: string } }).style;
+
+    expect(styleOf(0)?.align).toBe('justify');
+    expect(styleOf(1)?.align).toBe('justify');
+  });
 });
 
 describe('tables and lists', () => {

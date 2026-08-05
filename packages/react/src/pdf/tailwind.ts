@@ -25,7 +25,7 @@ export interface Resolved {
   borderSides?: ('top' | 'right' | 'bottom' | 'left')[];
   radius?: number;
   spaceAfter?: number;
-  align?: 'start' | 'end' | 'center';
+  align?: 'start' | 'end' | 'center' | 'justify';
 }
 
 /**
@@ -55,12 +55,13 @@ const SIDES = { t: 'top', r: 'right', b: 'bottom', l: 'left' } as const;
  * `text-right` has to be recognised before `right` is looked up as either and
  * reported as neither.
  */
-const ALIGNMENTS: Record<string, 'start' | 'end' | 'center' | undefined> = {
+const ALIGNMENTS: Record<string, 'start' | 'end' | 'center' | 'justify' | undefined> = {
   left: 'start',
   right: 'end',
   center: 'center',
   start: 'start',
   end: 'end',
+  justify: 'justify',
 };
 
 function apply(name: string, theme: Theme, out: Resolved): void {

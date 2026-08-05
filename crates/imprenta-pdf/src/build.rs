@@ -533,7 +533,9 @@ impl Compose<'_> {
                     .with_width(width)
                     .with_padding(Edges::bottom(text.style.space_after));
                 let track = Track { x: Pt(0.0), width };
-                for line in self.shaper.break_rich(&shaped, text.style.size, width) {
+                let mut lines = self.shaper.break_rich(&shaped, text.style.size, width);
+                justify(&mut lines, text.style.align, width);
+                for line in lines {
                     let shift = offset_within(track, line.width, align_of(text.style.align));
                     boxed = boxed.stack_at(shift, Content::Text(line));
                 }
@@ -741,10 +743,11 @@ impl Walk<'_> {
 
     fn text(&mut self, runs: &[ir::Run], style: ir::TextStyle, width: Pt) {
         let shaped = self.runs(runs, style);
-        let lines = self.shaper.break_rich(&shaped, style.size, width);
+        let mut lines = self.shaper.break_rich(&shaped, style.size, width);
         if lines.is_empty() {
             return;
         }
+        justify(&mut lines, style.align, width);
 
         let count = lines.len();
         for (i, line) in lines.into_iter().enumerate() {
@@ -960,6 +963,21 @@ impl Walk<'_> {
 /// flushes on, so a batch of a thousand rows is a handful of pages either way.
 const MEASURE_BATCH: usize = 1_024;
 
+/// Stretches every line but the last, when the paragraph asked to be justified.
+///
+/// The last line keeps the width it earned. A justified last line is what
+/// gives a naive implementation away — three words spread across the measure,
+/// which no typesetter has ever wanted.
+fn justify(lines: &mut [crate::shape::Line], align: ir::Align, width: Pt) {
+    if align != ir::Align::Justify {
+        return;
+    }
+    let last = lines.len().saturating_sub(1);
+    for line in lines.iter_mut().take(last) {
+        line.justify(width);
+    }
+}
+
 /// The declared alignment, as the layout names it.
 ///
 /// Two enums for one idea, and they stay two: the IR is the contract with
@@ -970,6 +988,7 @@ fn align_of(align: ir::Align) -> Align {
         ir::Align::Start => Align::Start,
         ir::Align::End => Align::End,
         ir::Align::Center => Align::Center,
+        ir::Align::Justify => Align::Justify,
     }
 }
 
@@ -2200,6 +2219,102 @@ mod tests {
         assert!(
             !ops.contains("62.015747 l"),
             "the background covers the gap that was meant to follow it"
+        );
+    }
+
+    #[test]
+    fn a_justified_paragraph_reaches_the_engine() {
+        // What justification *does* is asserted where the lines are built, in
+        // `shape`, in points. This is the other half and the one that has
+        // caught things before: that the word travels from the IR all the way
+        // to `Line::justify` at all. It cannot be read off the page — the
+        // widened advances go inside the text-showing operator — so what is
+        // checked is that the same paragraph comes out differently, and breaks
+        // in the same places while it does.
+        let words = "uno dos tres cuatro cinco seis siete ocho nueve diez once doce trece catorce quince dieciseis diecisiete dieciocho diecinueve veinte";
+
+        let paragraph = |align| {
+            ir::Node::Text(ir::Text {
+                runs: vec![ir::Run::new(words)],
+                style: ir::TextStyle {
+                    align,
+                    ..Default::default()
+                },
+            })
+        };
+
+        let plain = Options { compress: false };
+        let ragged = build(
+            &document(vec![paragraph(ir::Align::Start)]),
+            &assets(),
+            plain,
+        )
+        .expect("build");
+        let flush = build(
+            &document(vec![paragraph(ir::Align::Justify)]),
+            &assets(),
+            plain,
+        )
+        .expect("build");
+
+        let lines = |pdf: &[u8]| String::from_utf8_lossy(pdf).matches(" Tm").count();
+
+        assert!(
+            lines(&ragged.pdf) > 1,
+            "the sample has to wrap to mean anything"
+        );
+        assert_eq!(
+            lines(&ragged.pdf),
+            lines(&flush.pdf),
+            "justifying must not change where the text breaks"
+        );
+        assert_ne!(
+            String::from_utf8_lossy(&ragged.pdf),
+            String::from_utf8_lossy(&flush.pdf),
+            "the paragraph came out identical, so nothing was justified"
+        );
+        assert!(flush.diagnostics.is_empty(), "{:?}", flush.diagnostics);
+    }
+
+    #[test]
+    fn a_justified_paragraph_inside_a_band_is_justified_too() {
+        // The two text paths again: one for a paragraph in the flow, one for
+        // a paragraph composed inside something else. The first learnt to
+        // justify and the second did not, so a footer — which is a band, and
+        // therefore always composed — quietly kept its ragged edge while the
+        // same paragraph in the body came out flush. The symptom was a change
+        // small enough to talk yourself into seeing.
+        let paragraph = |align| {
+            ir::Node::Text(ir::Text {
+                runs: vec![ir::Run::new(
+                    "uno dos tres cuatro cinco seis siete ocho nueve diez once doce trece catorce quince dieciseis diecisiete dieciocho diecinueve veinte",
+                )],
+                style: ir::TextStyle {
+                    align,
+                    ..Default::default()
+                },
+            })
+        };
+
+        let banded = |align| ir::Document {
+            page: ir::PageSetup::default(),
+            header: Some(ir::Band {
+                height: Pt(120.0),
+                children: vec![paragraph(align)],
+            }),
+            footer: None,
+            accumulators: Vec::new(),
+            children: vec![paragraph(ir::Align::Start)],
+        };
+
+        let plain = Options { compress: false };
+        let ragged = build(&banded(ir::Align::Start), &assets(), plain).expect("build");
+        let flush = build(&banded(ir::Align::Justify), &assets(), plain).expect("build");
+
+        assert_ne!(
+            String::from_utf8_lossy(&ragged.pdf),
+            String::from_utf8_lossy(&flush.pdf),
+            "the band came out identical, so nothing in it was justified"
         );
     }
 }

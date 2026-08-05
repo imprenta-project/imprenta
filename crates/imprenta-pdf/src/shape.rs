@@ -688,6 +688,77 @@ impl Line {
             .unwrap_or(Color::BLACK)
     }
 
+    /// Widens this line's spaces until it reaches `width`.
+    ///
+    /// Justification is not alignment with a different offset: nothing moves,
+    /// the gaps between the words grow. Only the spaces grow — scaling every
+    /// advance would also hit the number and would set the words in a font
+    /// nobody chose.
+    ///
+    /// A trailing space takes no share, and does not count towards the line
+    /// either: it **hangs** past the edge. Almost every line a breaker returns
+    /// ends in one, so counting it leaves the last visible glyph short by
+    /// exactly its own advance — and since that advance is the same on every
+    /// line, the right edge comes out straight but inset, which reads as flush
+    /// until something else on the page is set against the same margin.
+    ///
+    /// Callers are expected to leave the last line of a paragraph alone; a
+    /// justified last line is the giveaway of a naive implementation.
+    pub fn justify(&mut self, width: Pt) {
+        let text = Arc::clone(&self.text);
+        let is_space = |glyph: &Glyph| {
+            text.get(glyph.text_range.start as usize..glyph.text_range.end as usize)
+                .is_some_and(|s| !s.is_empty() && s.chars().all(char::is_whitespace))
+        };
+
+        // Which glyphs are spaces, in order. Collected rather than walked
+        // twice because `glyphs()` flattens the segments and cannot be run
+        // backwards, and the trailing run has to be found from the end.
+        let spaces: Vec<bool> = self.glyphs().map(&is_space).collect();
+        let trailing = spaces.iter().rev().take_while(|&&s| s).count();
+        let stretchable = spaces[..spaces.len() - trailing]
+            .iter()
+            .filter(|&&s| s)
+            .count();
+        if stretchable == 0 {
+            return;
+        }
+
+        // Measured to the last glyph anybody can see, not to the end of the
+        // line. The hanging space still occupies its advance afterwards, so
+        // the glyphs add up to more than `width` — deliberately, since what
+        // has to land on the margin is the text.
+        let hanging: f32 = self
+            .glyphs()
+            .skip(spaces.len() - trailing)
+            .map(|glyph| glyph.x_advance)
+            .sum();
+        let slack = width.get() - (self.width.get() - hanging);
+        if slack <= 0.0 {
+            return;
+        }
+
+        let extra = slack / stretchable as f32;
+        let mut at = 0;
+        let mut x = Pt(0.0);
+
+        for segment in &mut self.segments {
+            segment.x = x;
+            let mut grown = 0.0f32;
+            for glyph in &mut segment.glyphs {
+                if spaces[at] && at < spaces.len() - trailing {
+                    glyph.x_advance += extra;
+                    grown += extra;
+                }
+                at += 1;
+            }
+            segment.width = segment.width + Pt(grown);
+            x = x + segment.width;
+        }
+
+        self.width = width;
+    }
+
     /// Sets the ink colour of every stretch. Shaping is colour-blind — the
     /// same glyphs serve every colour — so this is applied after the fact
     /// rather than being a second cache key.
@@ -1527,5 +1598,114 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(rich, plain);
+    }
+
+    #[test]
+    fn justifying_a_line_widens_its_spaces_and_nothing_else() {
+        // The measurement that matters is the line's own width: justified, it
+        // reaches the track exactly. Asserting that the spaces grew and the
+        // letters did not is the other half — a naive implementation that
+        // scaled every advance would also hit the width, and would set the
+        // words in a font nobody chose.
+        let mut line = shaper()
+            .break_lines("uno dos tres", Pt(10.0), Pt(400.0))
+            .remove(0);
+
+        let letters: Vec<f32> = line
+            .glyphs()
+            .filter(|g| &line.text[g.text_range.start as usize..g.text_range.end as usize] != " ")
+            .map(|g| g.x_advance)
+            .collect();
+        let ragged = line.width;
+
+        line.justify(Pt(300.0));
+
+        assert!((line.width.get() - 300.0).abs() < 0.01, "{:?}", line.width);
+        assert!(
+            ragged.get() < 300.0,
+            "the sample has to have slack to take up"
+        );
+
+        let after: Vec<f32> = line
+            .glyphs()
+            .filter(|g| &line.text[g.text_range.start as usize..g.text_range.end as usize] != " ")
+            .map(|g| g.x_advance)
+            .collect();
+        assert_eq!(letters, after, "a letter was stretched");
+    }
+
+    #[test]
+    fn justifying_a_line_puts_its_last_visible_glyph_on_the_edge() {
+        // `line.width` is the wrong thing to assert and passed while this was
+        // broken: the line reached the track, with the trailing space taking
+        // the last two and a half points and the text stopping before it.
+        // Every line came up short by the same amount, so the edge was
+        // straight — inset, but straight, which is the version of this bug
+        // that survives being looked at.
+        let mut lines = shaper().break_lines(
+            "uno dos tres cuatro cinco seis siete ocho nueve diez once doce trece",
+            Pt(10.0),
+            Pt(120.0),
+        );
+        assert!(lines.len() > 1, "the sample has to wrap to mean anything");
+
+        let visible_end = |line: &Line| {
+            let mut x = 0.0f32;
+            let mut visible = 0.0f32;
+            for glyph in line.glyphs() {
+                x += glyph.x_advance;
+                let at = glyph.text_range.start as usize..glyph.text_range.end as usize;
+                if !line.text[at].trim().is_empty() {
+                    visible = x;
+                }
+            }
+            visible
+        };
+
+        let line = &mut lines[0];
+        assert!(
+            line.glyphs().last().is_some_and(|glyph| {
+                let at = glyph.text_range.start as usize..glyph.text_range.end as usize;
+                line.text[at].chars().all(char::is_whitespace)
+            }),
+            "the sample has to end in a space to mean anything"
+        );
+
+        line.justify(Pt(120.0));
+
+        let reached = visible_end(line);
+        assert!(
+            (reached - 120.0).abs() < 0.01,
+            "the text stops at {reached}, short of the edge it was justified to"
+        );
+    }
+
+    #[test]
+    fn justifying_a_line_with_no_room_leaves_it_alone() {
+        // A line already at the track — or past it, which a single long word
+        // can be — has nothing to give away, and stretching backwards would
+        // pull it off the left of its own box.
+        let mut line = shaper()
+            .break_lines("uno dos", Pt(10.0), Pt(400.0))
+            .remove(0);
+        let before = line.clone();
+
+        line.justify(Pt(1.0));
+
+        assert_eq!(line, before);
+    }
+
+    #[test]
+    fn justifying_a_line_with_no_spaces_leaves_it_alone() {
+        // Nowhere to put the slack. Letter-spacing it would be a different
+        // typographic decision and not one to make on somebody's behalf.
+        let mut line = shaper()
+            .break_lines("supercalifragilistico", Pt(10.0), Pt(400.0))
+            .remove(0);
+        let before = line.clone();
+
+        line.justify(Pt(380.0));
+
+        assert_eq!(line, before);
     }
 }

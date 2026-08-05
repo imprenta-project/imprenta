@@ -457,6 +457,10 @@ pub enum Align {
     Start,
     End,
     Center,
+    /// Spaces widened until the line reaches the far edge, every line but the
+    /// last. Meaningful for a paragraph; a table cell takes it as `Start`,
+    /// since a cell is one line of a column and has no last line to spare.
+    Justify,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
