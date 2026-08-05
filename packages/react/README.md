@@ -38,9 +38,9 @@ refuses.
 
 ## It depends on React and nothing else
 
-Not on the native addon. A document can be declared anywhere — a browser, a
-worker, a machine where the engine is not installed — and rendered somewhere
-else entirely.
+Not on the engine. A document can be declared anywhere — a browser, a worker,
+a machine where the engine is not installed — and rendered somewhere else
+entirely.
 
 ## Tailwind
 

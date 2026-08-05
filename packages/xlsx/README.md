@@ -37,11 +37,23 @@ every sheet in its first entry. Rows are not, because a streaming producer does
 not have them yet. Merges can come last, which is what lets a total row's span
 be decided once the row count is known.
 
-## Installing
+## One writer, every runtime
 
-The compiled writer ships as a per-platform package —
-`@imprentajs/xlsx-darwin-arm64` and its siblings — pulled in through
-`optionalDependencies` and picked at run time.
+The writer is a single WebAssembly module that **imports nothing at all**, so
+there is no per-platform package to install and nothing to pick at run time.
+The same file runs in Node, the browser, Deno, Bun and on an edge worker.
+
+The calls above go to a worker. In a browser, reach for the writer directly:
+
+```ts
+import { Writer } from '@imprentajs/xlsx/writer';
+
+const writer = await Writer.load({ wasm });
+const { xlsx } = writer.write(ir);   // synchronous: put it in a Worker
+```
+
+The bytes come back as a `Uint8Array` rather than a `Buffer`, because `Buffer`
+is Node's. `Buffer.from(xlsx)` gets the string helpers back at no cost.
 
 ## Status
 

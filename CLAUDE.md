@@ -14,11 +14,12 @@ Write the failing test, watch it fail for the right reason, then write the code.
 A test that has never failed has never been shown to test anything. This applies
 to bug fixes too: reproduce first.
 
-**2. Rebuild the native addon before trusting a Node test.**
-`packages/pdf` and `packages/xlsx` are compiled artefacts of the napi crates. A stale `.node`
-means Node tests run against yesterday's engine, and serde silently drops fields
-the old binary does not know — so the test passes by comparing two documents
-that are both wrong. This has already produced one green test that was a lie.
+**2. Rebuild the WebAssembly module before trusting a Node test.**
+`packages/pdf` and `packages/xlsx` are compiled artefacts of the wasm crates. A
+stale `.wasm` means Node tests run against yesterday's engine, and serde
+silently drops fields the old module does not know — so the test passes by
+comparing two documents that are both wrong. This has already produced one
+green test that was a lie, and it caught the wasm migration out once more.
 After touching any Rust:
 
 ```bash
@@ -66,11 +67,11 @@ crates/
   imprenta-core/       units, colour, diagnostics, IR envelope — format-neutral
   imprenta-pdf/        the page engine: measure → pack → paint
   imprenta-xlsx/       the spreadsheet writer: a workbook model → OOXML
-  imprenta-pdf-napi/   the Node binding for the first  (cdylib); glue only
-  imprenta-xlsx-napi/  the Node binding for the second (cdylib); glue only
+  imprenta-pdf-wasm/   the page engine as a WebAssembly module; imports nothing
+  imprenta-xlsx-wasm/  the sheet writer as one too; a separate module, deliberately
 packages/
-  pdf/             @imprentajs/pdf   — the page addon, and its streaming Printer
-  xlsx/            @imprentajs/xlsx  — the sheet addon, and its streaming Book
+  pdf/             @imprentajs/pdf   — the page module, its worker pool and Printer
+  xlsx/            @imprentajs/xlsx  — the sheet module, its workers and Book
   react/           @imprentajs/react — one reconciler, a surface per format
   fonts/           @imprentajs/fonts — fetch and cache Google faces; no CLI needed
   cli/             @imprentajs/cli   — init, dev preview, build, and the checks
@@ -79,9 +80,36 @@ examples/
   backend/         React in, PDF or XLSX bytes out, no CLI anywhere
 ```
 
-Dependencies point one way: `core → {pdf, xlsx} → napi → the addons → the CLI`.
+Dependencies point one way: `core → {pdf, xlsx} → wasm → the packages → the CLI`.
 `@imprentajs/react` depends on React and nothing else — keep it that way, so a
-document can be declared where the addons cannot be installed.
+document can be declared where the engines cannot be installed.
+
+## One binding, and why it is WebAssembly
+
+There used to be two native addons, ten per-platform npm packages, a five-way
+build matrix and three hundred lines of publish workflow — all of it because a
+`.node` has to be linked on a machine that can produce that target. They are
+gone. Each engine is one WebAssembly module that **imports nothing at all**: no
+Node-API, no WASI, no shim, so one artefact runs in Node, a browser, Deno, Bun
+and on an edge worker, and on every platform the matrix never covered — musl,
+which is to say Alpine, which is to say a great many Docker images.
+
+What it costs is threads. A module has none — see
+`crates/imprenta-pdf-wasm/CLAUDE.md` for what was tried and why each route is
+shut — so *one engine* is single-core. The pool is what gets the cores back:
+across documents by dispatching them, and within one long document by planning
+where its pages fall, painting the ranges at once and merging them. On a
+2,113-page ledger that is **500 ms against the addon's 696**, and the design is
+written up in `packages/pdf/CLAUDE.md`.
+
+Two rules survive the change and are worth restating:
+
+- **New behaviour goes in `imprenta-pdf` or `imprenta-xlsx`, never in a
+  binding.** A binding that grows a layout decision is a bug in the making;
+  `lib.rs` in each wasm crate is glue and nothing else.
+- **The module imports nothing.** That is the property the whole argument rests
+  on, it is not self-evidently preserved by a future change, and
+  `packages/pdf/test/` asserts it against the built module.
 
 ## One vocabulary, two models
 
@@ -150,7 +178,8 @@ not know React exists.
   `pnpm-workspace.yaml`. Read the comment before bumping them.
 - Prefer a named type over an inline shape once it is used twice.
 - No `unwrap()` on anything a caller controls. A malformed document is a
-  `Diagnostic` or an `Err`, never a panic across the napi boundary.
+  `Diagnostic` or an `Err`, never a panic across the WebAssembly boundary —
+  where a panic is an unrecoverable trap and takes the whole instance with it.
 
 ## Comment style
 
@@ -167,25 +196,13 @@ Not `// normalise advance`. A comment that restates the line below it is noise;
 delete it. A module gets a `//!` header saying what it is for and what it
 deliberately does not do.
 
-## Commit style
-
-Sentence-case summary that says what the commit *does for someone*, not what it
-touched. Then a body in prose explaining the reasoning, what was measured, and
-what went wrong on the way.
-
-```
-Move the font loader out of the CLI, where a server cannot reach it
-
-`google()` was inside `@imprentajs/cli`, and the CLI is no use in a NestJS
-controller. It is `@imprentajs/fonts` now, which needs neither the CLI nor a
-config file. …
-```
-
-No `feat:`/`fix:` prefixes, no bullet lists of files, no "as requested".
-
 ## Traps that have already caught us
 
-- **A stale `.node` is a lying green test.** See rule 2 above.
+- **A stale `.wasm` is a lying green test.** See rule 2 above.
+- **Never export an unprefixed symbol from a wasm crate.** `alloc` interposed
+  over the system allocator and segfaulted the crate's own test binary before a
+  single test ran; `write` is POSIX. Every export is `imprenta_*` for that
+  reason, and it took an hour to find the first time.
 - **`#[serde(tag = "...")]` buffers the whole subtree** before it knows the
   variant (serde-rs/serde#1407). `ir::Node` has a hand-written `Deserialize` for
   that reason and `tests/allocations.rs` holds the line with a counting
@@ -207,10 +224,12 @@ No `feat:`/`fix:` prefixes, no bullet lists of files, no "as requested".
 - **Measure before claiming a speed or memory result.** A number in the README
   or in a comment needs a benchmark anybody can rerun — say where it is and on
   what input, and never benchmark a debug build.
-- **Only one `#[global_allocator]` in the whole workspace.** Two addons each
-  declaring one do not coexist in a process, and a service that prints and
-  exports loads both. It showed as the PDF engine aborting on a font that was
-  perfectly good. `packages/xlsx/test/together.test.ts` holds the line.
+- **Two engines in one process used to abort.** Two native addons could not
+  each declare a `#[global_allocator]`, and it showed as the PDF engine dying
+  on a font that was perfectly good. Two WebAssembly modules have a linear
+  memory each and cannot collide, so the trap is gone —
+  `packages/xlsx/test/together.test.ts` still runs and is now cheap insurance
+  rather than a scar.
 - **Look at the file.** Several defects — a list marker touching its text, a
   band overlapping the last line, a date showing as 46237 — pass every test
   and are obvious the moment anybody opens the thing. `openpyxl` is stricter
@@ -233,13 +252,12 @@ pnpm changeset          # describe the change; the file is the release note
 
 Landing that on `main` opens a "chore: version packages" pull request.
 Merging **that** cuts the tag and the GitHub release, and the release is what
-triggers the addons being compiled — five targets, two crates — and all fifteen
-packages going to npm.
+triggers the five packages going to npm.
 
-- **Fifteen, not five.** `@imprentajs/pdf` and `@imprentajs/xlsx` each ship an
-  `@imprentajs/<pkg>-<platform>` alongside them, generated at publish time. The
-  `.node` files cannot be built on one machine, which is the whole reason
-  `publish.yml` has a matrix.
+- **Five, and one job.** There is no matrix and there is not meant to be: both
+  engines are compiled in the publish job itself, which is why it installs the
+  `wasm32-unknown-unknown` target. Adding a second target would mean the "one
+  artefact" claim had quietly stopped being true.
 - **The five share one version**, as a `fixed` group. A `@imprentajs/cli` that
   shipped against a `@imprentajs/pdf` it was never tested with is the failure
   this repository is most careful about.

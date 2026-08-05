@@ -4,8 +4,8 @@ members = [
     "crates/imprenta-core",
     "crates/imprenta-pdf",
     "crates/imprenta-xlsx",
-    "crates/imprenta-pdf-napi",
-    "crates/imprenta-xlsx-napi",
+    "crates/imprenta-pdf-wasm",
+    "crates/imprenta-xlsx-wasm",
 ]
 
 [workspace.package]

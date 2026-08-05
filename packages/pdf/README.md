@@ -34,12 +34,43 @@ Await every `Printer` call before the next, and send rows in batches of a
 hundred to a thousand: one at a time costs a round trip each and is *slower*
 than not streaming at all.
 
-## Installing
+## One engine, every runtime
 
-The compiled engine ships as a per-platform package —
-`@imprentajs/pdf-darwin-arm64` and its siblings — pulled in through
-`optionalDependencies` and picked at run time. macOS, Linux and Windows on x64,
-plus arm64 on macOS and Linux.
+The engine is a single WebAssembly module that **imports nothing at all** — no
+Node-API, no WASI, no shim — so there is no per-platform package to install and
+nothing to pick at run time. The same file runs in Node, the browser, Deno, Bun
+and on an edge worker, and on every platform a native build matrix leaves out:
+musl, which is to say Alpine, which is to say a great many Docker images.
+
+The calls above go to a worker, so nothing blocks the thread that answers
+requests. In a browser there is no worker to hide behind and no filesystem to
+read the module from, so reach for the engine directly:
+
+```ts
+import { Engine } from '@imprentajs/pdf/engine';
+
+const engine = await Engine.load({ wasm, fonts });
+const { pdf } = engine.render(ir);   // synchronous: put it in a Worker
+```
+
+No cross-origin isolation, no `SharedArrayBuffer`, no COOP/COEP headers.
+
+The bytes come back as a `Uint8Array` rather than a `Buffer`, because `Buffer`
+is Node's. `Buffer.from(pdf)` gets the string helpers back at no cost.
+
+**Speed.** A WebAssembly module has no threads, so one engine renders on one
+core. The pool gets the cores back — across documents by dispatching them, and
+within one long document by splitting it. On 150,000 rows over 2,113 pages,
+twelve cores:
+
+| | |
+|---|---:|
+| one engine | 2,840 ms |
+| **split across twelve** | **500 ms** |
+| the native addon this replaced | 696 ms |
+
+Same page count, same numbering, one file. Splitting happens on its own for a
+document long enough to be worth it; `shard: false` turns it off.
 
 ## Status
 

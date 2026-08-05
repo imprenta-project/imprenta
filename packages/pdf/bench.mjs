@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { renderToFile } from './index.js';
+import { close, renderToFile } from './dist/index.js';
 
 const fonts = [{ data: readFileSync('../../crates/imprenta-pdf/tests/fonts/Roboto-Regular.ttf') }];
 const rows = Number(process.argv[2] ?? 100_000);
@@ -53,3 +53,6 @@ console.log(`output        ${(out.bytes / 1e6).toFixed(1)} MB`);
 console.log(
   `peak RSS      ${peak.toFixed(0)} MB  (${((peak / out.pages) * 1000).toFixed(1)} KB/page)`,
 );
+
+// The pool keeps its workers warm; nothing here exits without stopping them.
+await close();

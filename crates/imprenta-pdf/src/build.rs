@@ -181,6 +181,117 @@ pub fn build(
     })
 }
 
+/// Measures a run of table rows into the atoms the packer will see.
+///
+/// The first half of a sharded render: several of these run at once, on
+/// different ranges of the same table, and what they hand back is small enough
+/// to send anywhere — an atom is a height and a few flags, where the content it
+/// came from is every glyph run on the row.
+///
+/// It measures through exactly the path a real render measures through, which
+/// is the only reason the plan built from it can be trusted. A second measurer
+/// would be a second layout, and the two would part company on precisely the
+/// documents worth getting right.
+pub fn measure_rows(
+    assets: &Assets,
+    page: &ir::PageSetup,
+    head: &ir::TableHead,
+    rows: &[ir::Row],
+) -> Result<Vec<MeasuredRow>, BuildError> {
+    if assets.fonts.is_empty() {
+        return Err(BuildError::NoFonts);
+    }
+    let mut shaper = Shaper::with_faces(assets.fonts.iter().cloned());
+    let mut diagnostics = Diagnostics::default();
+
+    // Derived here rather than taken as an argument. A caller that worked the
+    // content width out for itself and got it wrong by a point would produce a
+    // plan for a differently-shaped document — rows wrapping one way to be
+    // measured and another to be painted — and every page after the first
+    // wrong row would be off. There is one way to know it and this is it.
+    let width = page.width - page.margin.horizontal();
+    let columns: Vec<Column> = head.columns.iter().map(column_of).collect();
+    let layout = Layout::new(columns, width - head.padding.horizontal());
+
+    let mut atoms = Vec::with_capacity(rows.len());
+    for batch in rows.chunks(MEASURE_BATCH) {
+        let cells: Vec<(Vec<Cell>, Decoration)> = batch
+            .iter()
+            .map(|row| (cells_of(row, Pt(9.0)), decoration_of(&row.style)))
+            .collect();
+        let built = layout.rows_reporting(
+            &mut shaper,
+            &assets.fonts,
+            &cells,
+            head.padding,
+            &mut diagnostics,
+        );
+        atoms.extend(built.into_iter().map(MeasuredRow));
+    }
+    Ok(atoms)
+}
+
+/// One row, measured.
+///
+/// Opaque on purpose: what is inside is the placed glyph runs, and the only
+/// two questions worth asking of it from outside are how tall it is — which
+/// the planner needs — and "paint yourself", which the painter needs. Anything
+/// else would be a second way to build a row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeasuredRow(BoxContent);
+
+impl MeasuredRow {
+    /// The atom the packer will see. Four bytes, against the kilobytes the row
+    /// itself weighs — which is why only this crosses between engines.
+    pub fn atom(&self) -> Atom {
+        Atom::new(self.0.height())
+    }
+
+    pub(crate) fn into_content(self) -> BoxContent {
+        self.0
+    }
+}
+
+/// Packs measured atoms and says where the pages fall, painting nothing.
+///
+/// The serial middle of a sharded render, and the cheap part: the packer sees
+/// heights and break flags, never text and never fonts. Measured on this
+/// engine, nine thousand pages take about ten milliseconds.
+///
+/// It answers the two things a fragment cannot work out for itself — which row
+/// each page begins at, and what the running totals stood at when it opened —
+/// and the one thing a whole document normally has to hold its pages to learn:
+/// how many there are.
+pub fn plan(
+    page: &ir::PageSetup,
+    assets: &Assets,
+    bands: &crate::session::Bands,
+    accumulators: usize,
+    atoms: &[Atom],
+) -> Result<Vec<crate::compose::PagePlan>, BuildError> {
+    if assets.fonts.is_empty() {
+        return Err(BuildError::NoFonts);
+    }
+    let shaper = Shaper::with_faces(assets.fonts.iter().cloned());
+    let geometry = Geometry {
+        width: page.width,
+        height: page.height,
+        margin: page.margin,
+        bands: Bands {
+            header: bands.header.as_ref().map_or(Pt(0.0), |b| b.height),
+            footer: bands.footer.as_ref().map_or(Pt(0.0), |b| b.height),
+        },
+    };
+    let mut composer =
+        Composer::new(geometry, Fonts::from_shaper(&shaper)?)?.with_accumulators(accumulators);
+    // `Content::Empty` throughout: the packer never looks, and what it would
+    // have looked at is the whole reason a document cannot be held in memory.
+    for atom in atoms {
+        composer.push(atom.clone(), Content::Empty);
+    }
+    Ok(composer.plan())
+}
+
 /// Paints the tail, building each page's bands as it goes.
 ///
 /// Shared by the whole-document path and the session, so a header cannot come
@@ -686,23 +797,7 @@ impl Walk<'_> {
     /// big to hold, and a session feeds it in pieces. `table` above is those
     /// pieces in a row, so both paths go through exactly the same code.
     pub(crate) fn open_table(&mut self, head: &ir::TableHead, width: Pt) -> OpenTable {
-        let columns: Vec<Column> = head
-            .columns
-            .iter()
-            .map(|c| {
-                Column::new(c.width)
-                    .aligned(match c.align {
-                        ir::Align::Start => Align::Start,
-                        ir::Align::End => Align::End,
-                        ir::Align::Center => Align::Center,
-                    })
-                    .overflowing(match c.overflow {
-                        ir::Overflow::Wrap => Overflow::Wrap,
-                        ir::Overflow::Ellipsis => Overflow::Ellipsis,
-                        ir::Overflow::Clip => Overflow::Clip,
-                    })
-            })
-            .collect();
+        let columns: Vec<Column> = head.columns.iter().map(column_of).collect();
         let layout = Layout::new(columns, width - head.padding.horizontal());
 
         // Indices come back from `push`, which returns absolute ones. Deriving
@@ -737,12 +832,31 @@ impl Walk<'_> {
     }
 
     pub(crate) fn table_rows(&mut self, open: &mut OpenTable, rows: &[ir::Row]) {
-        for row in rows {
-            let built = self.row(&open.layout, row, open.padding, Pt(9.0));
-            let index = self.emit(Atom::new(built.height()), Content::Box(built));
-            for total in &row.totals {
-                self.composer
-                    .contribute(index, total.accumulator, total.value);
+        // Measured in batches and emitted one at a time, rather than measured
+        // whole: a batch is what gives the workers something to share out,
+        // and emitting as we go is what keeps the composer releasing pages.
+        // Measuring a forty thousand row table before emitting any of it
+        // would hand back the flat memory this engine exists for.
+        for batch in rows.chunks(MEASURE_BATCH) {
+            let cells: Vec<(Vec<Cell>, Decoration)> = batch
+                .iter()
+                .map(|row| (cells_of(row, Pt(9.0)), decoration_of(&row.style)))
+                .collect();
+
+            let built = open.layout.rows_reporting(
+                self.shaper,
+                &self.assets.fonts,
+                &cells,
+                open.padding,
+                self.diagnostics,
+            );
+
+            for (row, built) in batch.iter().zip(built) {
+                let index = self.emit(Atom::new(built.height()), Content::Box(built));
+                for total in &row.totals {
+                    self.composer
+                        .contribute(index, total.accumulator, total.value);
+                }
             }
         }
     }
@@ -761,26 +875,61 @@ impl Walk<'_> {
         padding: Edges<Pt>,
         default_size: Pt,
     ) -> BoxContent {
-        let cells: Vec<Cell> = row
-            .cells
-            .iter()
-            .map(|c| {
-                let mut cell = Cell::new(&c.text, c.size.unwrap_or(default_size))
-                    .in_face(face_of(c.weight, c.italic));
-                if let Some(color) = c.color {
-                    cell = cell.inked(color);
-                }
-                cell
-            })
-            .collect();
         layout.row_reporting(
             self.shaper,
-            &cells,
+            &cells_of(row, default_size),
             decoration_of(&row.style),
             padding,
             self.diagnostics,
         )
     }
+}
+
+/// How many rows are measured before any of them is emitted.
+///
+/// Large enough that there is something for every core to do — a batch below
+/// [`crate::table`]'s threshold takes the sequential path — and small enough
+/// that the rows held while the batch is measured stay a few megabytes rather
+/// than the document. Two hundred and fifty-six atoms is what the composer
+/// flushes on, so a batch of a thousand rows is a handful of pages either way.
+const MEASURE_BATCH: usize = 1_024;
+
+/// One declared column, as the layout wants it.
+///
+/// Shared by the walk and by [`measure_rows`]: a planner that resolved a
+/// column differently would be planning a different table, and the pages it
+/// found would be right for a document nobody asked for.
+fn column_of(spec: &ir::ColumnSpec) -> Column {
+    Column::new(spec.width)
+        .aligned(match spec.align {
+            ir::Align::Start => Align::Start,
+            ir::Align::End => Align::End,
+            ir::Align::Center => Align::Center,
+        })
+        .overflowing(match spec.overflow {
+            ir::Overflow::Wrap => Overflow::Wrap,
+            ir::Overflow::Ellipsis => Overflow::Ellipsis,
+            ir::Overflow::Clip => Overflow::Clip,
+        })
+}
+
+/// The cells of one row, as the table layout wants them.
+///
+/// Built without a shaper on purpose: this is the half of a row that costs
+/// nothing, and keeping it separate is what lets the expensive half be handed
+/// to another thread.
+fn cells_of(row: &ir::Row, default_size: Pt) -> Vec<Cell> {
+    row.cells
+        .iter()
+        .map(|c| {
+            let mut cell = Cell::new(&c.text, c.size.unwrap_or(default_size))
+                .in_face(face_of(c.weight, c.italic));
+            if let Some(color) = c.color {
+                cell = cell.inked(color);
+            }
+            cell
+        })
+        .collect()
 }
 
 /// The width a node asks for, if it asks for one.
@@ -1384,6 +1533,160 @@ mod tests {
                 .collect(),
             ..ir::Table::empty()
         })])
+    }
+
+    /// The head a `ledger` is fed as, when it is fed rather than declared.
+    fn ledger_head() -> ir::TableHead {
+        ir::TableHead {
+            columns: vec![ir::ColumnSpec::default(), ir::ColumnSpec::default()],
+            header: None,
+            repeat_header: true,
+            padding: Edges::default(),
+            space_after: Pt(0.0),
+        }
+    }
+
+    fn ledger_rows(rows: usize) -> Vec<ir::Row> {
+        (0..rows)
+            .map(|i| ir::Row {
+                cells: vec![
+                    ir::Cell::new(format!("Asiento {i}")),
+                    ir::Cell::new("1.200,00"),
+                ],
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn planning_finds_the_pages_a_real_render_produces() {
+        // The property the whole sharded path rests on. A plan that disagreed
+        // with the render by a single page would put every fragment after it
+        // one page out, and the only sign would be the page numbers — which is
+        // to say, the thing the reader looks at.
+        let assets = assets();
+        let real = build(&ledger(2_000), &assets, Options::default()).unwrap();
+
+        let measured = measure_rows(
+            &assets,
+            &ir::PageSetup::default(),
+            &ledger_head(),
+            &ledger_rows(2_000),
+        )
+        .unwrap();
+        let atoms: Vec<Atom> = measured.iter().map(MeasuredRow::atom).collect();
+        let plan = plan(
+            &ir::PageSetup::default(),
+            &assets,
+            &crate::session::Bands::none(),
+            0,
+            &atoms,
+        )
+        .unwrap();
+
+        assert!(real.pages > 20, "the fixture must paginate properly");
+        assert_eq!(plan.len(), real.pages);
+    }
+
+    #[test]
+    fn planning_costs_atoms_and_not_content() {
+        // Planning holds the whole document where rendering deliberately does
+        // not, so what it holds has to be the cheap half. An atom is a height
+        // and a few flags; the content it came from is the glyph runs, and at
+        // fifty thousand pages that is the difference between two megabytes
+        // and ten gigabytes.
+        let measured = measure_rows(
+            &assets(),
+            &ir::PageSetup::default(),
+            &ledger_head(),
+            &ledger_rows(1_000),
+        )
+        .unwrap();
+
+        assert_eq!(measured.len(), 1_000);
+        assert!(
+            size_of::<Atom>() <= 32,
+            "an atom is {} bytes; planning holds one per row",
+            size_of::<Atom>()
+        );
+    }
+
+    #[test]
+    fn painting_from_measured_rows_gives_the_document_measuring_again_would() {
+        // The optimisation the sharded path lives or dies by. Measuring is
+        // 60% of a render, and doing it once to plan and again to paint means
+        // paying it twice — which cost exactly the margin over the native
+        // addon. Rows measured once and painted from must produce byte for
+        // byte what measuring them again produces, or the saving is a
+        // different document.
+        let assets = assets();
+        let rows = ledger_rows(600);
+
+        let measured_once = {
+            let measured =
+                measure_rows(&assets, &ir::PageSetup::default(), &ledger_head(), &rows).unwrap();
+            let mut session = crate::session::Session::open(
+                ir::PageSetup::default(),
+                0,
+                assets.clone(),
+                Options::default(),
+            )
+            .unwrap();
+            session.feed_measured(&measured).unwrap();
+            session.finish().unwrap()
+        };
+
+        let measured_again = render_rows(&assets, &rows, None).unwrap();
+
+        assert_eq!(measured_once.pages, measured_again.pages);
+        assert_eq!(measured_once.pdf, measured_again.pdf);
+    }
+
+    #[test]
+    fn a_ledger_split_at_a_planned_boundary_paginates_as_one_document() {
+        // End to end: plan, split where the plan says a page began, render the
+        // pieces, and check they add up. Splitting anywhere else repaginates,
+        // which is the failure this whole approach has to not have.
+        let assets = assets();
+        let rows = ledger_rows(900);
+        let measured =
+            measure_rows(&assets, &ir::PageSetup::default(), &ledger_head(), &rows).unwrap();
+        let atoms: Vec<Atom> = measured.iter().map(MeasuredRow::atom).collect();
+        let plan = plan(
+            &ir::PageSetup::default(),
+            &assets,
+            &crate::session::Bands::none(),
+            0,
+            &atoms,
+        )
+        .unwrap();
+
+        let half = plan.len() / 2;
+        let split = plan[half].first_atom;
+
+        let head = render_rows(&assets, &rows[..split], None).unwrap();
+        let tail = render_rows(&assets, &rows[split..], Some((half + 1, plan.len()))).unwrap();
+
+        assert_eq!(head.pages + tail.pages, plan.len());
+        assert_eq!(head.pages, half);
+    }
+
+    /// Renders a run of rows, optionally as a fragment resuming a document.
+    fn render_rows(
+        assets: &Assets,
+        rows: &[ir::Row],
+        resuming: Option<(usize, usize)>,
+    ) -> Result<Built, BuildError> {
+        let page = ir::PageSetup::default();
+        let mut session =
+            crate::session::Session::open(page, 0, assets.clone(), Options::default())?;
+        if let Some((first, total)) = resuming {
+            session = session.resuming(first, total, Vec::new());
+        }
+        session.feed(&crate::session::Chunk::OpenTable(ledger_head()))?;
+        session.feed(&crate::session::Chunk::Rows(rows.to_vec()))?;
+        session.feed(&crate::session::Chunk::CloseTable)?;
+        session.finish()
     }
 
     #[test]

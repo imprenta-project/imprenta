@@ -1,5 +1,3 @@
-import { DocumentStream, type StreamOptions, type StreamResult } from '../index.js';
-
 /**
  * A document fed to the engine a piece at a time.
  *
@@ -9,38 +7,77 @@ import { DocumentStream, type StreamOptions, type StreamResult } from '../index.
  * byte the pages `render` would have produced from the same content declared
  * whole.
  *
- * Each call is a promise and has to be awaited before the next: that is what
- * keeps a batch from queueing up behind the engine, which would put the
- * document back in memory by another route.
+ * A session is stateful and cannot move between engines, so a `Printer` takes
+ * one out of the pool and holds it until `finish`. On a pool of eight that
+ * means eight open documents at once and a ninth waiting, which is the honest
+ * cost of streaming rather than a limit worth hiding.
  */
+import { asRender, poolFor, type RenderOptions, type RenderResult } from './index.js';
+import type { Job, Lease } from './pool.js';
+
+/** The page a document is set on, as the IR declares it. */
+export interface PageSetup {
+  width: number;
+  height: number;
+  margin?: unknown;
+}
+
+export interface PrinterOptions extends RenderOptions {
+  /** A band repeated at the top of every page. */
+  header?: unknown;
+  footer?: unknown;
+  /** Names of the running totals, in the order a band refers to them. */
+  accumulators?: string[];
+}
+
+export interface StreamResult extends Omit<RenderResult, 'pdf'> {
+  /** `null` when a path was given: the bytes went to disk and never here. */
+  pdf: Uint8Array | null;
+  /** Present only when a path was given. */
+  path?: string;
+}
+
 export class Printer {
-  private readonly inner: DocumentStream;
+  private lease: Lease | null = null;
+  private readonly opening: Promise<void>;
+  private pendingAtoms = 0;
+  private done = false;
 
   /**
    * `page` is the same setup a whole document declares.
    *
-   * Bands are given here rather than fed as pieces because they belong to
-   * the document: the paginator has to know how much room a header takes
-   * before it packs the first row.
+   * Bands are given here rather than fed as pieces because they belong to the
+   * document: the paginator has to know how much room a header takes before it
+   * packs the first row.
    */
   constructor(page: PageSetup, options: PrinterOptions) {
-    const { header, footer, ...rest } = options;
-    this.inner = new DocumentStream(JSON.stringify(page), {
-      ...rest,
-      ...(header ? { header: JSON.stringify(header) } : {}),
-      ...(footer ? { footer: JSON.stringify(footer) } : {}),
+    const setup = JSON.stringify({
+      page,
+      ...(options.header ? { header: options.header } : {}),
+      ...(options.footer ? { footer: options.footer } : {}),
+      ...(options.accumulators ? { accumulators: options.accumulators } : {}),
     });
+    this.opening = (async () => {
+      const pool = await poolFor(options);
+      const lease = await pool.lease();
+      try {
+        await lease.send({ op: 'open', setup });
+        this.lease = lease;
+      } catch (error) {
+        // A document that never opened must not sit on an engine.
+        lease.release();
+        throw error;
+      }
+    })();
+    // Nobody awaits a constructor, so a failure to open would surface as an
+    // unhandled rejection before the first call could report it. Held here,
+    // and re-raised by whatever is called next.
+    this.opening.catch(() => undefined);
   }
 
-  /**
-   * Adds a batch of nodes — headings, paragraphs, whole short tables.
-   *
-   * Plenty of documents have no table in them at all, and for those this is
-   * the whole API. Batch as you would rows: sending a transcript's paragraphs
-   * one at a time costs a round trip each and is slower than not streaming.
-   */
+  /** Adds a batch of nodes — headings, paragraphs, whole short tables. */
   nodes(nodes: unknown[]): Promise<void> {
-    return this.inner.nodes(JSON.stringify(nodes));
+    return this.feed({ op: 'nodes', json: JSON.stringify(nodes) });
   }
 
   /** Adds one node. Convenience for the times there is only one. */
@@ -50,46 +87,67 @@ export class Printer {
 
   /** Begins a table. Its rows follow, in as many batches as suits you. */
   openTable(head: unknown): Promise<void> {
-    return this.inner.openTable(JSON.stringify(head));
+    return this.feed({ op: 'openTable', json: JSON.stringify(head) });
   }
 
   /**
    * Adds a batch of rows.
    *
-   * Batch size is a memory-against-overhead trade and nothing else. Measured
-   * on a hundred thousand rows: one row per batch takes 2.5 s because the hop
-   * to the engine's thread dominates; a hundred takes 1.35 s; a thousand takes
-   * 1.33 s; ten thousand takes the same 1.33 s but doubles what the heap
-   * holds. Anywhere from a hundred to a thousand, and a thousand by default.
+   * Batch size is a memory-against-overhead trade and nothing else. Sending
+   * rows one at a time costs a message each and is slower than not streaming;
+   * a hundred to a thousand is the range worth being in, and ten thousand buys
+   * nothing while doubling what the heap holds.
    */
   rows(rows: unknown[]): Promise<void> {
-    return this.inner.rows(JSON.stringify(rows));
+    return this.feed({ op: 'rows', json: JSON.stringify(rows) });
   }
 
   closeTable(): Promise<void> {
-    return this.inner.closeTable();
+    return this.feed({ op: 'closeTable' });
   }
 
   /** Paints what is left and closes the file. */
-  finish(path?: string): Promise<StreamResult> {
-    return this.inner.finish(path);
+  async finish(path?: string): Promise<StreamResult> {
+    const lease = await this.claim();
+    this.done = true;
+    try {
+      const reply = await lease.send(path ? { op: 'finish', path } : { op: 'finish' });
+      if (path) {
+        return {
+          path: reply.path as string,
+          pdf: null,
+          pages: reply.pages as number,
+          bytes: reply.bytes as number,
+          diagnostics: reply.diagnostics as string[],
+        };
+      }
+      return asRender(reply);
+    } finally {
+      lease.release();
+      this.lease = null;
+    }
   }
 
-  /** Atoms the engine is still holding: about a page's worth, always. */
+  /**
+   * Atoms the engine is still holding: about a page's worth, always.
+   *
+   * Reported back with every batch rather than fetched on demand, so watching
+   * the number the whole design exists to keep flat costs nothing.
+   */
   get pending(): number {
-    return this.inner.pending;
+    return this.pendingAtoms;
   }
-}
 
-export interface PrinterOptions extends Omit<StreamOptions, 'header' | 'footer'> {
-  /** Repeated at the top of every page. */
-  header?: unknown;
-  /** Repeated at the bottom of every page. */
-  footer?: unknown;
-}
+  private async feed(request: Job): Promise<void> {
+    const lease = await this.claim();
+    const reply = await lease.send(request);
+    this.pendingAtoms = (reply.pending as number) ?? this.pendingAtoms;
+  }
 
-export interface PageSetup {
-  width?: number;
-  height?: number;
-  margin?: number | { top?: number; right?: number; bottom?: number; left?: number };
+  private async claim(): Promise<Lease> {
+    if (this.done) throw new Error('this document has already been finished');
+    await this.opening;
+    if (!this.lease) throw new Error('this document is not open');
+    return this.lease;
+  }
 }

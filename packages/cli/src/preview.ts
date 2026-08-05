@@ -377,7 +377,7 @@ async function render(
     const { write } = await import('@imprentajs/xlsx');
     const out = await write(JSON.stringify(rendered.ir));
     return {
-      bytes: out.xlsx,
+      bytes: Buffer.from(out.xlsx),
       report: {
         id,
         format: 'xlsx',
@@ -402,7 +402,7 @@ async function render(
   });
 
   return {
-    bytes: out.pdf,
+    bytes: Buffer.from(out.pdf),
     report: {
       id,
       format: 'pdf',

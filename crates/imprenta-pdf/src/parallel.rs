@@ -84,7 +84,7 @@ const PARALLEL_THRESHOLD: usize = 256;
 
 /// Chunks large enough that each worker's cache warms up, and numerous enough
 /// that rayon can still balance the load.
-fn chunk_size(total: usize) -> usize {
+pub(crate) fn chunk_size(total: usize) -> usize {
     let workers = rayon::current_num_threads().max(1);
     (total / (workers * 4)).max(64)
 }

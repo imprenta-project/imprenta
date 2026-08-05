@@ -127,7 +127,7 @@ describe('React to PDF', () => {
 
     const out = await toPdf(ir, assets);
 
-    expect(out.pdf.subarray(0, 5).toString()).toBe('%PDF-');
+    expect(Buffer.from(out.pdf.subarray(0, 5)).toString()).toBe('%PDF-');
     expect(out.pages).toBe(1);
     expect(out.diagnostics).toEqual([]);
   });
@@ -139,7 +139,7 @@ describe('React to PDF', () => {
     const once = await toPdf(await render(<Invoice number="FV-1" />), assets);
     const twice = await toPdf(await render(<Invoice number="FV-1" />), assets);
 
-    expect(once.pdf.equals(twice.pdf)).toBe(true);
+    expect(Buffer.from(once.pdf).equals(Buffer.from(twice.pdf))).toBe(true);
   });
 
   it('paginates a long table and carries its header over', async () => {

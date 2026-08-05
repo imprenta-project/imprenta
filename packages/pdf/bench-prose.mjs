@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { close, renderToFile } from './dist/index.js';
 import { Printer } from './dist/stream.js';
-import { renderToFile } from './index.js';
 
 const fonts = [{ data: readFileSync('../../crates/imprenta-pdf/tests/fonts/Roboto-Regular.ttf') }];
 const page = { width: 595, height: 842, margin: { top: 40, bottom: 40, left: 40, right: 40 } };
@@ -51,3 +51,6 @@ if (process.argv[2] === 'whole') {
     `         heap peak ${mb(heap)} MB  held ${printer.pending}  RSS ${(process.resourceUsage().maxRSS / 1024).toFixed(0)} MB`,
   );
 }
+
+// The pool keeps its workers warm; nothing here exits without stopping them.
+await close();
