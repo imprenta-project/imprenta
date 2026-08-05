@@ -1,5 +1,92 @@
 # @imprentajs/pdf
 
+## 0.1.0-alpha.4
+
+### Minor Changes
+
+- [`34e948f`](https://github.com/imprenta-project/imprenta/commit/34e948f4f046b4bce6335e6328266e85d06ae18d) Thanks [@AbianS](https://github.com/AbianS)! - Four things a page needed and could not have: a paragraph set against the
+  right edge, one justified, a gap that pins what follows to the foot of the
+  page, and space after a box that falls outside its background.
+
+  **A paragraph can be aligned, and justified.**
+
+  ```tsx
+  <Text align="end">36.390,62 €</Text>
+  <Text className="text-right">Lanzagrava S.L.</Text>
+  <Text align="justify">…un párrafo legal que llena la caja…</Text>
+  ```
+
+  Alignment existed only on a table column, so the one way to put a figure
+  against the right margin was to make it a table — and a table cannot be nested,
+  which meant it could not go in a header, a footer, or inside a box with a
+  background. An invoice is full of things that are not tables and still have to
+  line up on the right: a company address in the masthead, a total in its own
+  box. There was no way to say so.
+
+  It is the same `Align` a table column takes, deliberately: an amount under a
+  table has to line up with the amounts in it, and two notions of "the right
+  edge" would eventually disagree by a fraction of a point. `text-left`,
+  `text-right` and `text-center` resolve to it too — Tailwind spells alignment
+  with the same utility as size and colour, so those are recognised before
+  `right` can be looked up as either and reported as neither.
+
+  Left-aligned text is untouched and costs nothing: a line that is not shifted is
+  emitted exactly as before, with no box around it. That matters at the size this
+  engine is built for — a box per line across fifty thousand pages would be a box
+  per line.
+
+  `justify` is the odd one out and is not a fourth direction to shove the line
+  in: nothing moves, the spaces widen until the line reaches the far edge. Only
+  the spaces — scaling every advance would also hit the number and would set the
+  words in a font nobody chose. The last line of a paragraph keeps the width it
+  earned, and a line with no spaces in it is left alone rather than letter-spaced,
+  which is a different typographic decision and not one to make on somebody's
+  behalf.
+
+  What lands on the margin is the last glyph anybody can see. Almost every line a
+  breaker returns ends in a space, and a space that counts towards the line
+  leaves the text short by exactly its own advance — the same amount on every
+  line, so the right edge comes out straight but inset, which reads as flush
+  until something else on the page is set against the same margin. It hangs past
+  the edge instead.
+
+  **`spaceAfter` no longer grows the box it was meant to follow.**
+
+  At the top level it always behaved: the space became a spacer emitted after the
+  box. Composed — in a header, in a footer, or nested inside another container —
+  it was folded into the box's own bottom padding instead, so a box with a
+  background or a border grew by exactly that much and whatever followed stayed
+  welded to it. An author asking for room after a tinted panel got a taller
+  tinted panel, and nothing said otherwise.
+
+  The folding is right for a paragraph, which is what it was written for: text
+  has nothing painted behind it, and a paragraph has to sit the same whether or
+  not it has a neighbour. A decorated container does have something painted
+  behind it, and that is the whole difference. Nothing changes when `spaceAfter`
+  is zero — the box is returned as it was, with no wrapper around it.
+
+  **`<Spacer grow />` takes whatever is left of the page.**
+
+  ```tsx
+  …totals…
+  <Spacer grow />
+  <Row background="#F9FAFB">…payment terms…</Row>
+  ```
+
+  The one measurement an author cannot make for themselves: only the packer
+  knows where the content stopped. Without it, a block meant for the foot of the
+  page — payment terms, a signature line — sits wherever the content above it
+  happened to end. `height` becomes the least the gap may be, and it is what the
+  atom is budgeted at while the run is being fitted, so the arithmetic that chose
+  the page and the height that gets painted cannot disagree.
+
+  It keeps with what follows, deliberately. A gap that swallowed the whole page
+  would push that block onto the next one, which is the opposite of what was
+  asked for; what it actually takes is the room left once the rest of its run is
+  accounted for. Inside a box there is no page to take the rest of, and that is
+  reported rather than ignored — a gap that does nothing looks exactly like a gap
+  nobody asked for.
+
 ## 0.1.0-alpha.3
 
 ### Patch Changes

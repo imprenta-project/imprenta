@@ -1,6 +1,6 @@
 {
   "name": "@imprentajs/react",
-  "version": "0.1.0-alpha.3",
+  "version": "0.1.0-alpha.4",
   "description": "Declare an Imprenta document in React.",
   "license": "Apache-2.0",
   "type": "module",
