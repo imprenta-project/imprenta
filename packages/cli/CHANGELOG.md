@@ -1,5 +1,15 @@
 # @imprentajs/cli
 
+## 0.1.0-alpha.3
+
+### Patch Changes
+
+- Updated dependencies [[`376787f`](https://github.com/imprenta-project/imprenta/commit/376787f7fd0fd5293b5471bfa1c6244b0b72d085), [`228b615`](https://github.com/imprenta-project/imprenta/commit/228b615b8e98d674875659fa6bb04e13459c08ef)]:
+  - @imprentajs/react@0.1.0-alpha.3
+  - @imprentajs/pdf@0.1.0-alpha.3
+  - @imprentajs/xlsx@0.1.0-alpha.3
+  - @imprentajs/fonts@0.1.0-alpha.3
+
 ## 0.1.0-alpha.2
 
 ### Minor Changes
