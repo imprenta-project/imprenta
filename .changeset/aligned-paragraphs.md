@@ -3,9 +3,9 @@
 "@imprentajs/react": minor
 ---
 
-Three things a page needed and could not have: a paragraph set against the
-right edge, one justified, and space after a box that falls outside its
-background.
+Four things a page needed and could not have: a paragraph set against the
+right edge, one justified, a gap that pins what follows to the foot of the
+page, and space after a box that falls outside its background.
 
 **A paragraph can be aligned, and justified.**
 
@@ -63,3 +63,25 @@ has nothing painted behind it, and a paragraph has to sit the same whether or
 not it has a neighbour. A decorated container does have something painted
 behind it, and that is the whole difference. Nothing changes when `spaceAfter`
 is zero — the box is returned as it was, with no wrapper around it.
+
+**`<Spacer grow />` takes whatever is left of the page.**
+
+```tsx
+…totals…
+<Spacer grow />
+<Row background="#F9FAFB">…payment terms…</Row>
+```
+
+The one measurement an author cannot make for themselves: only the packer
+knows where the content stopped. Without it, a block meant for the foot of the
+page — payment terms, a signature line — sits wherever the content above it
+happened to end. `height` becomes the least the gap may be, and it is what the
+atom is budgeted at while the run is being fitted, so the arithmetic that chose
+the page and the height that gets painted cannot disagree.
+
+It keeps with what follows, deliberately. A gap that swallowed the whole page
+would push that block onto the next one, which is the opposite of what was
+asked for; what it actually takes is the room left once the rest of its run is
+accounted for. Inside a box there is no page to take the rest of, and that is
+reported rather than ignored — a gap that does nothing looks exactly like a gap
+nobody asked for.

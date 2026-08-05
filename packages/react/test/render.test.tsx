@@ -123,6 +123,22 @@ describe('the elements', () => {
     expect(JSON.stringify(document)).toContain('"deep"');
   });
 
+  it('carries a growing spacer through, and says nothing when it is not one', async () => {
+    // The one thing an author cannot work out for themselves: how much room
+    // is left on the page. `grow` is what hands that question to the packer,
+    // so it has to survive the trip; and a plain spacer must not start
+    // carrying a field it never asked for.
+    const document = await toDocument(
+      <Document>
+        <Spacer grow />
+        <Spacer height={12} />
+      </Document>,
+    );
+
+    expect(document.children[0]).toEqual({ t: 'spacer', height: 0, grow: true });
+    expect(document.children[1]).toEqual({ t: 'spacer', height: 12 });
+  });
+
   it('carries the leaves through with their props', async () => {
     const document = await toDocument(
       <Document>

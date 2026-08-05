@@ -142,9 +142,17 @@ pub struct Link {
 
 /// Vertical space that draws nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Spacer {
+    /// How tall the gap is, and — when it grows — the least it may be.
     pub height: Pt,
+    /// Takes whatever is left of the page, so that whatever follows sits at
+    /// its foot. An invoice's payment terms, a signature line.
+    ///
+    /// Only meaningful in the flow: composed inside a box there is no page to
+    /// take the rest of, and the engine says so rather than doing nothing.
+    #[serde(default)]
+    pub grow: bool,
 }
 
 /// Forces the next content onto a new page.
@@ -700,7 +708,10 @@ mod tests {
             }),
             Node::Box(Container {
                 style: BoxStyle::default(),
-                children: vec![Node::Spacer(Spacer { height: Pt(4.0) })],
+                children: vec![Node::Spacer(Spacer {
+                    height: Pt(4.0),
+                    grow: false,
+                })],
             }),
             Node::Row(Container {
                 style: BoxStyle::default(),
@@ -712,9 +723,15 @@ mod tests {
             }),
             Node::Link(Link {
                 href: "https://example.org".into(),
-                child: Box::new(Node::Spacer(Spacer { height: Pt(1.0) })),
+                child: Box::new(Node::Spacer(Spacer {
+                    height: Pt(1.0),
+                    grow: false,
+                })),
             }),
-            Node::Spacer(Spacer { height: Pt(10.0) }),
+            Node::Spacer(Spacer {
+                height: Pt(10.0),
+                grow: false,
+            }),
             Node::PageBreak(PageBreak { to: BreakTo::Odd }),
         ] {
             round_trip(&node);
@@ -773,7 +790,11 @@ mod tests {
 
     #[test]
     fn a_node_is_tagged_by_kind_so_a_producer_can_write_it_by_hand() {
-        let json = serde_json::to_string(&Node::Spacer(Spacer { height: Pt(6.0) })).unwrap();
+        let json = serde_json::to_string(&Node::Spacer(Spacer {
+            height: Pt(6.0),
+            grow: false,
+        }))
+        .unwrap();
 
         assert!(json.contains(r#""t":"spacer""#), "{json}");
     }
@@ -864,7 +885,10 @@ mod tests {
                         ..Default::default()
                     },
                 }),
-                Node::Spacer(Spacer { height: Pt(8.0) }),
+                Node::Spacer(Spacer {
+                    height: Pt(8.0),
+                    grow: false,
+                }),
             ],
             header: None,
             footer: None,
@@ -900,7 +924,13 @@ mod tests {
         let last: Node = serde_json::from_str(r#"{"height":12,"t":"spacer"}"#).unwrap();
 
         assert_eq!(first, last);
-        assert_eq!(first, Node::Spacer(Spacer { height: Pt(12.0) }));
+        assert_eq!(
+            first,
+            Node::Spacer(Spacer {
+                height: Pt(12.0),
+                grow: false
+            })
+        );
     }
 
     #[test]
@@ -962,7 +992,10 @@ mod tests {
             }),
             Node::Link(Link {
                 href: "https://example.org".into(),
-                child: std::boxed::Box::new(Node::Spacer(Spacer { height: Pt(1.0) })),
+                child: std::boxed::Box::new(Node::Spacer(Spacer {
+                    height: Pt(1.0),
+                    grow: false,
+                })),
             }),
             Node::Canvas(Canvas {
                 width: Pt(10.0),
@@ -972,7 +1005,10 @@ mod tests {
                 stroke: None,
                 space_after: Pt(0.0),
             }),
-            Node::Spacer(Spacer { height: Pt(4.0) }),
+            Node::Spacer(Spacer {
+                height: Pt(4.0),
+                grow: false,
+            }),
             Node::PageBreak(PageBreak { to: BreakTo::Odd }),
         ];
 

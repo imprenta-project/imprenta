@@ -140,7 +140,11 @@ function block(node: HostNode, theme: Theme): IrNode {
     case 'image':
       return { t: 'image', src: props.src as string, width: props.width as number };
     case 'spacer':
-      return { t: 'spacer', height: props.height as number };
+      return irNode({
+        t: 'spacer',
+        height: (props.height as number) ?? 0,
+        grow: props.grow ? true : undefined,
+      });
     case 'pageBreak':
       return irNode({ t: 'pageBreak', to: props.to });
     case 'table':

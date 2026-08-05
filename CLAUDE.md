@@ -150,9 +150,11 @@ Three phases, and the seams between them are the design:
 
 Two rules follow, and most bugs here come from breaking one of them:
 
-- **A new primitive must not touch the packer.** It adds an IR node, a measurer,
-  and a `content::Content` variant. If you find yourself adding a case to
-  `pack.rs`, the abstraction is wrong.
+- **A new primitive usually must not touch the packer.** It adds an IR node, a
+  measurer, and a `content::Content` variant. A case in `pack.rs` keyed on the
+  *kind* of thing an atom is means the abstraction is wrong; a new arithmetic
+  property on `Atom` — `grow`, which asks how much of the page is left — is the
+  exception, because that answer exists nowhere else.
 - **Composition streams.** Pages are painted and dropped as content arrives, so
   memory is flat per page regardless of length. Anything that holds all pages —
   `<PageCount />` is the only one today — must say so out loud.

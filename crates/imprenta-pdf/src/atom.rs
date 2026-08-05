@@ -29,12 +29,23 @@ pub enum Break {
 /// One measured, indivisible slice of content.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Atom {
+    /// How tall the atom is, and — when it grows — the least it may be.
     pub height: Pt,
     /// This atom must not be the last on its page. A section heading or a
     /// table's column header stranded at the foot of a page, with its content
     /// overleaf, is the defect this prevents.
     pub keep_with_next: bool,
     pub break_before: Break,
+    /// Takes whatever is left of the page it lands on, once everything else
+    /// in its run has had its share.
+    ///
+    /// This is how a block is pinned to the foot of a page — an invoice's
+    /// payment terms, a signature line — and it is the one thing an author
+    /// cannot work out for themselves, because only the packer knows where
+    /// the content stopped. It keeps with what follows for the same reason:
+    /// a gap that swallowed the whole page would push that block onto the
+    /// next one, which is the opposite of what was asked for.
+    pub grow: bool,
 }
 
 impl Atom {
@@ -43,6 +54,7 @@ impl Atom {
             height,
             keep_with_next: false,
             break_before: Break::Auto,
+            grow: false,
         }
     }
 

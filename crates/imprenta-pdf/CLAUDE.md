@@ -24,18 +24,21 @@ not do.
 
 ## The rules that keep this fast
 
-**1. The packer must stay ignorant.**
-`pack.rs` sees heights, break flags and `keep_with_next`. It must never learn
-whether an atom came from a paragraph, a table or something not yet written. If
-a change adds a case to `pack.rs` for a new primitive, the abstraction is wrong
-— find the property the packer already understands. Widows and orphans are the
-worked example: both reduce to `keep_with_next`, so the packer knows nothing
-about either.
+**1. The packer must stay ignorant of *what*, not of *how much*.**
+`pack.rs` must never learn whether an atom came from a paragraph, a table or
+something not yet written. What it may know is arithmetic: heights, break
+flags, `keep_with_next`, `grow`. Widows and orphans are the worked example on
+one side — both reduce to `keep_with_next`, so the packer knows nothing about
+either — and `grow` is the example on the other: how much of a page is left
+over is a fact only the packer holds, so no measurer could have reduced it to
+anything. Reach for a property that already exists first; add one only when the
+answer genuinely lives here, and say so on the field.
 
-**2. Adding a primitive touches four places and not the packer.**
+**2. Adding a primitive touches four places, and usually not the packer.**
 An `ir::Node` variant → a measurer producing atoms → a `content::Content`
 variant → a `render` arm that paints it. Plus its `Decoration`, which is always
-supplied by the caller.
+supplied by the caller. A case in `pack.rs` keyed on the *kind* of thing an
+atom is remains wrong; a new arithmetic property on `Atom` is not.
 
 **3. A box and its content are one atom, not two stacked.**
 Two atoms lay out one after the other, so the text lands below its own

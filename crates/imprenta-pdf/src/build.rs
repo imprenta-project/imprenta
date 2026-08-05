@@ -543,10 +543,25 @@ impl Compose<'_> {
             }
             ir::Node::Image(image) => Content::Image(self.image_content(&image.src, image.width)?),
             ir::Node::Canvas(canvas) => Content::Canvas(canvas_content(canvas)),
-            ir::Node::Spacer(spacer) => Content::Box(
-                BoxContent::default()
-                    .with_padding(Edges::symmetric(Pt(spacer.height.get() / 2.0), Pt(0.0))),
-            ),
+            ir::Node::Spacer(spacer) => {
+                if spacer.grow {
+                    // A box has no page, so there is no remainder to take.
+                    // Said out loud rather than silently ignored: a gap that
+                    // does nothing looks exactly like a gap that was never
+                    // asked for.
+                    self.diagnostics.report(
+                        imprenta_core::diagnostic::Diagnostic::error(
+                            "not-inline",
+                            "a growing spacer cannot be nested here".to_string(),
+                        )
+                        .with_hint("put it at the top level of the document, where there is a page to fill"),
+                    );
+                }
+                Content::Box(
+                    BoxContent::default()
+                        .with_padding(Edges::symmetric(Pt(spacer.height.get() / 2.0), Pt(0.0))),
+                )
+            }
             ir::Node::Box(c) => self.container(c, width, false)?,
             ir::Node::Row(c) => self.container(c, width, true)?,
             ir::Node::Link(link) => Content::Link(Box::new(
@@ -711,6 +726,13 @@ impl Walk<'_> {
                     ir::BreakTo::Odd => Break::Odd,
                     ir::BreakTo::Even => Break::Even,
                 });
+            }
+            ir::Node::Spacer(spacer) if spacer.grow => {
+                let mut atom = Atom::new(spacer.height);
+                atom.grow = true;
+                // Kept with what follows on purpose: see `Atom::grow`.
+                atom.keep_with_next = true;
+                self.emit(atom, Content::Empty);
             }
             ir::Node::Spacer(spacer) => self.spacer(spacer.height),
             ir::Node::Text(text) => self.text(&text.runs, text.style, width),
@@ -1923,7 +1945,10 @@ mod tests {
                     space_after: Pt(space),
                     ..Default::default()
                 },
-                children: vec![ir::Node::Spacer(ir::Spacer { height: Pt(10.0) })],
+                children: vec![ir::Node::Spacer(ir::Spacer {
+                    height: Pt(10.0),
+                    grow: false,
+                })],
             })
         };
 
@@ -1955,7 +1980,10 @@ mod tests {
                 },
                 ..Default::default()
             },
-            children: vec![ir::Node::Spacer(ir::Spacer { height: Pt(10.0) })],
+            children: vec![ir::Node::Spacer(ir::Spacer {
+                height: Pt(10.0),
+                grow: false,
+            })],
         })]);
 
         let built = build(&document, &assets(), Options::default()).unwrap();
@@ -1987,7 +2015,10 @@ mod tests {
                 },
                 ..Default::default()
             },
-            children: vec![ir::Node::Spacer(ir::Spacer { height: Pt(10.0) })],
+            children: vec![ir::Node::Spacer(ir::Spacer {
+                height: Pt(10.0),
+                grow: false,
+            })],
         })]);
 
         let built = build(&document, &assets(), Options::default()).unwrap();
@@ -2010,7 +2041,10 @@ mod tests {
                 },
                 ..Default::default()
             },
-            children: vec![ir::Node::Spacer(ir::Spacer { height: Pt(10.0) })],
+            children: vec![ir::Node::Spacer(ir::Spacer {
+                height: Pt(10.0),
+                grow: false,
+            })],
         })]);
 
         let built = build(&document, &assets(), Options::default()).unwrap();

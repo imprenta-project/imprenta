@@ -101,7 +101,17 @@ export interface LinkProps {
 }
 
 export interface SpacerProps {
-  height: number;
+  height?: number;
+  /**
+   * Takes whatever is left of the page, so that whatever follows sits at its
+   * foot — an invoice's payment terms, a signature line.
+   *
+   * The one thing an author cannot work out for themselves: only the packer
+   * knows where the content stopped. `height` becomes the least the gap may
+   * be. Meaningful in the flow only; inside a box there is no page to fill,
+   * and the engine says so rather than quietly doing nothing.
+   */
+  grow?: boolean;
 }
 
 export interface PageBreakProps {

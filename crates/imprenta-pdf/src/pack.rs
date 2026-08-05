@@ -252,13 +252,39 @@ pub fn pack(flow: &Flow, budget: Pt) -> Vec<Page> {
             y = y + repeat.height;
         }
 
+        // What the growing atoms of this run will expand by, worked out once,
+        // before any of them is placed.
+        //
+        // Every atom is budgeted at its declared height while the run is being
+        // fitted, and only then does the slack get handed out — so the
+        // arithmetic that chose this page and the heights that get painted
+        // cannot disagree. Growers share what is left equally, each keeping
+        // its declared height as a floor, which is the behaviour anyone who
+        // has met a flex layout will expect of two gaps in one run.
+        //
+        // The slack is clamped at zero because a run taller than a whole page
+        // is placed anyway rather than searched for a page that fits (see the
+        // emptiness guard above). Without the clamp its growers would take a
+        // negative share and what follows would be painted above the top edge.
+        let growers = run.clone().filter(|&i| atoms[i].grow).count();
+        let share = if growers == 0 {
+            0.0
+        } else {
+            let declared = atoms[run.clone()]
+                .iter()
+                .fold(Pt(0.0), |total, a| total + a.height);
+            (budget.get() - y.get() - declared.get()).max(0.0) / growers as f32
+        };
+
         for i in run.clone() {
-            current.placements.push(Placement {
-                atom: i,
-                y,
-                height: atoms[i].height,
-            });
-            y = y + atoms[i].height;
+            let height = if atoms[i].grow {
+                atoms[i].height + Pt(share)
+            } else {
+                atoms[i].height
+            };
+
+            current.placements.push(Placement { atom: i, y, height });
+            y = y + height;
             if let Some(g) = group_containing(flow.groups, i) {
                 started[g] = true;
             }
@@ -1143,6 +1169,126 @@ mod tests {
         assert!(
             !pages[1].continuations.is_empty(),
             "later pages still get it"
+        );
+    }
+
+    #[test]
+    fn a_growing_atom_pushes_what_follows_to_the_foot_of_the_page() {
+        // The whole point of the primitive: an invoice's payment terms sit at
+        // the bottom of the page, not wherever the totals happened to end.
+        //
+        // The growing atom cannot simply swallow the rest of the page — that
+        // would put the block after it on the *next* one, which is the
+        // opposite of what was asked. It takes what is left once everything
+        // else in its run has had its share, which is why it keeps with what
+        // follows.
+        let mut atoms = atoms_of_height(3, 10.0);
+        let mut gap = Atom::new(Pt(0.0));
+        gap.grow = true;
+        gap.keep_with_next = true;
+        atoms.push(gap);
+        atoms.push(Atom::new(Pt(20.0)));
+
+        let pages = pack(&Flow::new(&atoms), Pt(100.0));
+
+        assert_eq!(pages.len(), 1, "everything fits on one page");
+        let placed = &pages[0].placements;
+        // Three atoms of ten, then the gap, then the block. The block's top
+        // has to be the budget less its own height: 100 − 20.
+        assert_eq!(placed[4].y, Pt(80.0), "the block is not at the foot");
+        assert_eq!(placed[3].height, Pt(50.0), "the gap took the wrong share");
+    }
+
+    #[test]
+    fn a_growing_atom_that_does_not_fit_takes_the_next_page_whole() {
+        // Nine atoms of ten leave ten points, and the block needs twenty. The
+        // run moves to a fresh page and the gap grows there instead — the
+        // block still lands at the foot, just of the page after.
+        let mut atoms = atoms_of_height(9, 10.0);
+        let mut gap = Atom::new(Pt(0.0));
+        gap.grow = true;
+        gap.keep_with_next = true;
+        atoms.push(gap);
+        atoms.push(Atom::new(Pt(20.0)));
+
+        let pages = pack(&Flow::new(&atoms), Pt(100.0));
+
+        assert_eq!(pages.len(), 2);
+        let second = &pages[1].placements;
+        assert_eq!(
+            second[1].y,
+            Pt(80.0),
+            "the block is not at the foot of page two"
+        );
+    }
+
+    #[test]
+    fn a_growing_atom_takes_the_room_left_on_its_page() {
+        // `height` is the floor it grows from, not the size it comes out at:
+        // nine atoms of ten leave ten points, and a gap declared at six ends
+        // up filling all ten. Being budgeted at six while the run is fitted is
+        // what keeps the decision and the drawing in agreement.
+        let mut atoms = atoms_of_height(9, 10.0);
+        let mut gap = Atom::new(Pt(6.0));
+        gap.grow = true;
+        atoms.push(gap);
+
+        let pages = pack(&Flow::new(&atoms), Pt(100.0));
+
+        assert_eq!(pages.len(), 1);
+        assert_eq!(
+            pages[0].placements[9].height,
+            Pt(10.0),
+            "the gap should fill the page"
+        );
+    }
+
+    #[test]
+    fn two_growing_atoms_in_one_run_share_what_is_left() {
+        // Whatever a reader expects of two gaps in one run, it is not that the
+        // first swallows everything and the second is a hairline. They split
+        // the slack, which is what the same declaration does in every layout
+        // anybody has met.
+        let gap = || {
+            let mut gap = Atom::new(Pt(0.0));
+            gap.grow = true;
+            gap.keep_with_next = true;
+            gap
+        };
+        let atoms = vec![gap(), gap(), Atom::new(Pt(20.0))];
+
+        let pages = pack(&Flow::new(&atoms), Pt(100.0));
+
+        let placed = &pages[0].placements;
+        assert_eq!(placed[0].height, Pt(40.0), "the first gap took too much");
+        assert_eq!(placed[1].height, Pt(40.0), "the second gap was starved");
+        assert_eq!(placed[2].y, Pt(80.0), "the block is not at the foot");
+    }
+
+    #[test]
+    fn a_run_too_tall_for_the_page_gives_its_growers_nothing() {
+        // A run that cannot fit anywhere is placed where it lands and allowed
+        // to overflow, rather than sent looking for a page big enough. So the
+        // room left over is *negative*, and a grower handed a negative share
+        // would end up shorter than nothing — putting what follows above the
+        // top edge of the page, at a y the painter has no business receiving.
+        let mut gap = Atom::new(Pt(30.0));
+        gap.grow = true;
+        gap.keep_with_next = true;
+        let atoms = vec![gap, Atom::new(Pt(120.0))];
+
+        let pages = pack(&Flow::new(&atoms), Pt(100.0));
+
+        let placed = &pages[0].placements;
+        assert_eq!(
+            placed[0].height,
+            Pt(30.0),
+            "the gap did not keep the height it declared"
+        );
+        assert_eq!(
+            placed[1].y,
+            Pt(30.0),
+            "what follows the gap is not where the gap left off"
         );
     }
 }
