@@ -543,18 +543,8 @@ impl Compose<'_> {
                 BoxContent::default()
                     .with_padding(Edges::symmetric(Pt(spacer.height.get() / 2.0), Pt(0.0))),
             ),
-            ir::Node::Box(c) | ir::Node::Row(c) => {
-                let outer = c.style.width.unwrap_or(width);
-                let inner = outer - c.style.padding.horizontal();
-                check_corners(&c.style, self.diagnostics);
-                let mut boxed = BoxContent::new(decoration_of(&c.style))
-                    .with_width(outer)
-                    .with_padding(c.style.padding.plus_bottom(c.style.space_after));
-                for child in &c.children {
-                    boxed = boxed.stack(self.inline(child, inner)?);
-                }
-                Content::Box(boxed)
-            }
+            ir::Node::Box(c) => self.container(c, width, false)?,
+            ir::Node::Row(c) => self.container(c, width, true)?,
             ir::Node::Link(link) => Content::Link(Box::new(
                 LinkContent::url(link.href.clone(), self.inline(&link.child, width)?)
                     .with_width(width),
@@ -572,6 +562,72 @@ impl Compose<'_> {
                 Content::Empty
             }
         })
+    }
+
+    /// A box or a row, as one piece of content.
+    fn container(
+        &mut self,
+        c: &ir::Container,
+        width: Pt,
+        side_by_side: bool,
+    ) -> Result<Content, BuildError> {
+        let outer = c.style.width.unwrap_or(width);
+        let inner = outer - c.style.padding.horizontal();
+        check_corners(&c.style, self.diagnostics);
+        let boxed = BoxContent::new(decoration_of(&c.style))
+            .with_width(outer)
+            .with_padding(c.style.padding.plus_bottom(c.style.space_after));
+
+        Ok(Content::Box(self.fill(
+            boxed,
+            &c.children,
+            inner,
+            side_by_side,
+        )?))
+    }
+
+    /// Puts children into a container, beside one another or stacked.
+    ///
+    /// Shared with [`Walk::container`], and that is the point: the two used to
+    /// have a copy of this each and only the walked one had ever been taught
+    /// what a row is. A row nested anywhere — in a box, in another row, in a
+    /// band — was therefore composed as a box and its children stacked,
+    /// without a word said about it. Whatever else changes here, both callers
+    /// have to keep arriving at the same geometry.
+    fn fill(
+        &mut self,
+        mut boxed: BoxContent,
+        children: &[ir::Node],
+        inner: Pt,
+        side_by_side: bool,
+    ) -> Result<BoxContent, BuildError> {
+        if !side_by_side {
+            for child in children {
+                boxed = boxed.stack(self.inline(child, inner)?);
+            }
+            return Ok(boxed);
+        }
+
+        // Declared widths are taken first; the rest share what is left, the
+        // same rule table columns follow.
+        let declared: f32 = children.iter().filter_map(declared_width).sum();
+        let flexible = children
+            .iter()
+            .filter(|c| declared_width(c).is_none())
+            .count();
+        let share = if flexible == 0 {
+            0.0
+        } else {
+            (inner.get() - declared).max(0.0) / flexible as f32
+        };
+
+        let mut x = Pt(0.0);
+        for child in children {
+            let child_width = Pt(declared_width(child).unwrap_or(share));
+            boxed = boxed.place(x, self.inline(child, child_width)?);
+            x = x + child_width;
+        }
+        Ok(boxed)
     }
 }
 
@@ -705,35 +761,13 @@ impl Walk<'_> {
         check_corners(style, self.diagnostics);
         let outer = style.width.unwrap_or(width);
         let inner = outer - style.padding.horizontal();
-        let mut boxed = BoxContent::new(decoration_of(style))
+        let boxed = BoxContent::new(decoration_of(style))
             .with_width(outer)
             .with_padding(style.padding);
 
-        if side_by_side {
-            // Declared widths are taken first; the rest share what is left,
-            // the same rule table columns follow.
-            let declared: f32 = children.iter().filter_map(declared_width).sum();
-            let flexible = children
-                .iter()
-                .filter(|c| declared_width(c).is_none())
-                .count();
-            let share = if flexible == 0 {
-                0.0
-            } else {
-                (inner.get() - declared).max(0.0) / flexible as f32
-            };
-
-            let mut x = Pt(0.0);
-            for child in children {
-                let child_width = Pt(declared_width(child).unwrap_or(share));
-                boxed = boxed.place(x, self.inline(child, child_width)?);
-                x = x + child_width;
-            }
-        } else {
-            for child in children {
-                boxed = boxed.stack(self.inline(child, inner)?);
-            }
-        }
+        // The placement itself is `Compose`'s, so that a row walked at the top
+        // level and a row composed inside something else cannot drift apart.
+        let boxed = self.compose().fill(boxed, children, inner, side_by_side)?;
 
         let mut atom = Atom::new(boxed.height());
         atom.keep_with_next = style.keep_with_next;
@@ -1922,6 +1956,53 @@ mod tests {
         let built = build(&document, &assets(), Options::default()).unwrap();
 
         assert!(built.diagnostics.is_empty(), "{:?}", built.diagnostics);
+    }
+
+    #[test]
+    fn a_row_nested_in_a_box_lays_its_children_side_by_side() {
+        // A row only laid its children out side by side at the top level.
+        // Anywhere else — inside a box, inside another row, inside a header or
+        // a footer, all of which are composed rather than walked — it was
+        // treated as a box and its children stacked. Silently: no diagnostic,
+        // a document that renders and is wrong, which is the one failure a
+        // preview cannot show anybody who does not already know what to look
+        // for. Nothing but the coordinates tells the two apart, so the
+        // coordinates are what this asserts.
+        let panel = |w: f32| {
+            ir::Node::Box(ir::Container {
+                style: ir::BoxStyle {
+                    background: Some(Color::BLACK),
+                    width: Some(Pt(w)),
+                    ..Default::default()
+                },
+                children: vec![paragraph("x")],
+            })
+        };
+
+        let nested = ir::Node::Box(ir::Container {
+            style: ir::BoxStyle::default(),
+            children: vec![ir::Node::Row(ir::Container {
+                style: ir::BoxStyle::default(),
+                children: vec![panel(150.0), panel(150.0)],
+            })],
+        });
+
+        // Uncompressed, so the rectangles can be read back at all.
+        let built = build(
+            &document(vec![nested]),
+            &assets(),
+            Options { compress: false },
+        )
+        .expect("build");
+        let ops = String::from_utf8_lossy(&built.pdf);
+
+        // The left margin is 34.02, so the first panel ends at 184.02 and the
+        // second starts there — on the same y, which is what makes it beside
+        // rather than below.
+        assert!(
+            ops.contains("184.01575 34.015747 m"),
+            "the second panel is not beside the first"
+        );
     }
 }
 
