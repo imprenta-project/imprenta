@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { write } from '../index.js';
+import { write } from '../dist/index.js';
 
 /**
  * What a stricter reader than ours makes of what we wrote.

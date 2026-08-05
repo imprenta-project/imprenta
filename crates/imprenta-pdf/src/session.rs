@@ -128,10 +128,44 @@ impl Session {
         })
     }
 
+    /// Composes a piece of a document some other session began.
+    ///
+    /// See [`crate::compose::Composer::resuming`]: the fragment is told which
+    /// page it starts on, how many there are in all, and what the running
+    /// totals stood at when the piece before it ended. It produces the pages
+    /// the whole document would have produced **only if it starts where a page
+    /// started**, which is what [`crate::build::plan`] is for.
+    pub fn resuming(mut self, page: usize, total: usize, opening: Vec<f64>) -> Self {
+        self.composer = self.composer.resuming(page, total, opening);
+        self
+    }
+
     /// Names the running totals, so a band can ask for one by name.
     pub fn with_accumulator_names(mut self, names: Vec<String>) -> Self {
         self.names = names;
         self
+    }
+
+    /// Adds rows that have already been measured.
+    ///
+    /// The other half of [`crate::build::measure_rows`], and the reason a
+    /// sharded render measures a row once rather than twice: the engine that
+    /// measured it to plan is the engine that paints it, and what it kept is
+    /// exactly what painting needs.
+    ///
+    /// The rows must have been measured against the same table and the same
+    /// width, which is the caller's to get right — measuring them for one
+    /// layout and painting them into another is not something this can see.
+    pub fn feed_measured(&mut self, rows: &[crate::build::MeasuredRow]) -> Result<(), BuildError> {
+        for row in rows {
+            let atom = row.atom();
+            let content = crate::content::Content::Box(row.clone().into_content());
+            self.composer.push(atom, content);
+            if self.composer.pending() >= 256 {
+                self.composer.flush();
+            }
+        }
+        Ok(())
     }
 
     /// Reads one piece.

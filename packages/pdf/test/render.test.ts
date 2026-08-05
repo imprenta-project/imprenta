@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { type RenderOptions, render, renderToFile } from '../index.js';
+import { type RenderOptions, render, renderToFile } from '../dist/index.js';
 
 const fixtures = fileURLToPath(new URL('../../../crates/imprenta-pdf/tests', import.meta.url));
 const font = (name: string) => readFileSync(join(fixtures, 'fonts', name));
@@ -48,7 +48,7 @@ describe('render', () => {
   it('returns a PDF for a document declared as JSON', async () => {
     const out = await render(hello, roman);
 
-    expect(out.pdf.subarray(0, 5).toString()).toBe('%PDF-');
+    expect(Buffer.from(out.pdf.subarray(0, 5)).toString()).toBe('%PDF-');
     expect(out.pages).toBe(1);
     expect(out.bytes).toBe(out.pdf.length);
   });
@@ -142,7 +142,7 @@ describe('the event loop', () => {
     ]);
 
     for (const out of outs) {
-      expect(out.pdf.subarray(0, 5).toString()).toBe('%PDF-');
+      expect(Buffer.from(out.pdf.subarray(0, 5)).toString()).toBe('%PDF-');
     }
   });
 });

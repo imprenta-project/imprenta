@@ -1,6 +1,6 @@
 [package]
-name = "imprenta-xlsx-napi"
-description = "Node bindings for the Imprenta spreadsheet writer"
+name = "imprenta-xlsx-wasm"
+description = "The Imprenta spreadsheet writer as a plain WebAssembly module"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,15 +15,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 imprenta-xlsx.workspace = true
-imprenta-core.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-
-napi = { version = "3", features = ["napi4"] }
-napi-derive = "3"
-
-[build-dependencies]
-napi-build = "2"
 
 [dev-dependencies]
 calamine = "0.35.0"

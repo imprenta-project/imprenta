@@ -62,7 +62,8 @@ const print = async (element: Parameters<typeof toChunks>[0]) => {
       await printer?.closeTable();
     }
   }
-  return printer?.finish();
+  if (!printer) throw new Error('the element produced no document to print');
+  return printer.finish();
 };
 
 describe('React straight into the printer', () => {
@@ -74,8 +75,8 @@ describe('React straight into the printer', () => {
     const whole = await toPdf(await render(element), roman);
     const streamed = await print(element);
 
-    expect(streamed?.pages).toBe(whole.pages);
-    expect(streamed?.pdf?.equals(whole.pdf)).toBe(true);
+    expect(streamed.pages).toBe(whole.pages);
+    expect(Buffer.from(streamed.pdf!).equals(Buffer.from(whole.pdf))).toBe(true);
   }, 60_000);
 
   it('numbers the pages, which needs the total and so needs the whole document', async () => {

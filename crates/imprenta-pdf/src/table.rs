@@ -19,10 +19,18 @@
 use crate::content::{BoxContent, Content};
 use crate::decoration::Decoration;
 use crate::measure::{Measured, TextStyle, measure_text_in};
+use crate::parallel::{Faces, chunk_size};
 use crate::shape::{Face, Shaper, report_missing};
 use imprenta_core::color::Color;
 use imprenta_core::diagnostic::{Diagnostic, Diagnostics};
 use imprenta_core::units::{Edges, Length, Pt};
+use rayon::prelude::*;
+
+/// Below this many rows, building a `Shaper` per worker costs more than
+/// spreading the batch out saves. The same reasoning — and roughly the same
+/// number — as [`crate::parallel`]'s threshold for blocks of text, but a row
+/// is several cells so it takes fewer of them to be worth it.
+const PARALLEL_ROWS: usize = 128;
 
 /// Where a cell's content sits within its column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -246,6 +254,65 @@ impl Layout {
             );
         }
         row
+    }
+
+    /// Lays out many rows at once, across every core, in order.
+    ///
+    /// Measuring is where a ledger spends its time and one row knows nothing
+    /// about the next, so the batch is the natural unit to parallelise —
+    /// unlike packing, which has to walk the document in order and is what
+    /// makes a running total possible at all.
+    ///
+    /// Each worker builds its own [`Shaper`], and therefore its own cache.
+    /// One shared behind a lock would serialise the very thing being spread
+    /// out, and a per-worker cache still sees most of the repetition: rows are
+    /// handed out in contiguous chunks and a ledger repeats its labels
+    /// everywhere rather than in one corner.
+    ///
+    /// Diagnostics are collected per worker and merged in row order, so a
+    /// clipped column reads the same however many cores found it.
+    pub fn rows_reporting(
+        &self,
+        shaper: &mut Shaper,
+        faces: &Faces,
+        rows: &[(Vec<Cell>, Decoration)],
+        padding: Edges<Pt>,
+        diagnostics: &mut Diagnostics,
+    ) -> Vec<BoxContent> {
+        if rows.len() < PARALLEL_ROWS {
+            // The caller's shaper is already warm. Building one per worker to
+            // measure four rows costs more than the four rows do.
+            return rows
+                .iter()
+                .map(|(cells, decoration)| {
+                    self.row_reporting(shaper, cells, *decoration, padding, diagnostics)
+                })
+                .collect();
+        }
+
+        let measured: Vec<(Vec<BoxContent>, Diagnostics)> = rows
+            .par_chunks(chunk_size(rows.len()))
+            .map(|chunk| {
+                let mut shaper = Shaper::with_faces(faces.iter().cloned());
+                let mut found = Diagnostics::default();
+                let built = chunk
+                    .iter()
+                    .map(|(cells, decoration)| {
+                        self.row_reporting(&mut shaper, cells, *decoration, padding, &mut found)
+                    })
+                    .collect();
+                (built, found)
+            })
+            .collect();
+
+        let mut built = Vec::with_capacity(rows.len());
+        for (chunk, found) in measured {
+            built.extend(chunk);
+            for diagnostic in found.iter() {
+                diagnostics.report(diagnostic.clone());
+            }
+        }
+        built
     }
 
     /// One cell as its own box.
@@ -1181,6 +1248,119 @@ mod tests {
         assert!(
             first_line(&heavy, 0).width.get() > first_line(&plain, 0).width.get(),
             "the bold face was not used for measurement"
+        );
+    }
+
+    /// A batch big enough that the parallel path is the one taken.
+    fn ledger_rows(count: usize) -> Vec<(Vec<Cell>, Decoration)> {
+        (0..count)
+            .map(|i| {
+                (
+                    vec![
+                        Cell::new(
+                            format!("Prestación de servicios profesionales, asiento {i}"),
+                            Pt(8.0),
+                        ),
+                        Cell::new("1.200,00", Pt(8.0)),
+                    ],
+                    Decoration::default(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn measuring_many_rows_at_once_gives_the_same_rows_as_one_at_a_time() {
+        // Rows handed out across workers must land identically to rows
+        // measured in order. If they did not, a ledger would depend on how
+        // many cores happened to render it — and nothing about the output
+        // would look wrong enough to notice.
+        let layout = Layout::new(vec![fixed(90.0), fixed(60.0)], Pt(150.0));
+        let faces: Faces = vec![(Face::REGULAR, ROBOTO.to_vec())];
+        let rows = ledger_rows(2_000);
+
+        let one_at_a_time: Vec<BoxContent> = rows
+            .iter()
+            .map(|(cells, decoration)| {
+                layout.row(&mut shaper(), cells, *decoration, Edges::default())
+            })
+            .collect();
+
+        let batched = layout.rows_reporting(
+            &mut shaper(),
+            &faces,
+            &rows,
+            Edges::default(),
+            &mut Diagnostics::default(),
+        );
+
+        assert_eq!(batched.len(), one_at_a_time.len());
+        for (i, (batch, single)) in batched.iter().zip(&one_at_a_time).enumerate() {
+            assert_eq!(batch, single, "row {i} measured differently in a batch");
+        }
+    }
+
+    #[test]
+    fn a_small_batch_still_comes_back_in_order() {
+        // Under the threshold the caller's own shaper is used rather than a
+        // fresh one per worker, and that path has to agree too.
+        let layout = Layout::new(vec![fixed(90.0), fixed(60.0)], Pt(150.0));
+        let faces: Faces = vec![(Face::REGULAR, ROBOTO.to_vec())];
+        let rows = ledger_rows(4);
+
+        let batched = layout.rows_reporting(
+            &mut shaper(),
+            &faces,
+            &rows,
+            Edges::default(),
+            &mut Diagnostics::default(),
+        );
+
+        assert_eq!(batched.len(), 4);
+        for (i, row) in batched.iter().enumerate() {
+            let single = layout.row(&mut shaper(), &rows[i].0, rows[i].1, Edges::default());
+            assert_eq!(row, &single, "row {i} differs");
+        }
+    }
+
+    #[test]
+    fn a_batch_reports_what_a_row_at_a_time_reports() {
+        // Diagnostics are found on worker threads and have to arrive back.
+        // A clipped column that only complained when rendered serially would
+        // be a defect that CI sees and production does not, or the reverse.
+        let columns = vec![Column::new(Length::Pt(Pt(20.0))).overflowing(Overflow::Ellipsis)];
+        let layout = Layout::new(columns, Pt(20.0));
+        let faces: Faces = vec![(Face::REGULAR, ROBOTO.to_vec())];
+        let rows: Vec<(Vec<Cell>, Decoration)> = (0..1_000)
+            .map(|i| {
+                (
+                    vec![Cell::new(
+                        format!("un texto mucho más ancho que su columna {i}"),
+                        Pt(8.0),
+                    )],
+                    Decoration::default(),
+                )
+            })
+            .collect();
+
+        let mut serial = Diagnostics::default();
+        for (cells, decoration) in &rows {
+            layout.row_reporting(
+                &mut shaper(),
+                cells,
+                *decoration,
+                Edges::default(),
+                &mut serial,
+            );
+        }
+
+        let mut batched = Diagnostics::default();
+        layout.rows_reporting(&mut shaper(), &faces, &rows, Edges::default(), &mut batched);
+
+        assert!(!serial.is_empty(), "the fixture should have clipped");
+        assert_eq!(
+            batched.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+            serial.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
         );
     }
 }

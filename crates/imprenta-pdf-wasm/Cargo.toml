@@ -1,0 +1,26 @@
+[package]
+name = "imprenta-pdf-wasm"
+description = "The Imprenta PDF engine as a plain WebAssembly module"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+imprenta-pdf.workspace = true
+imprenta-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+# Reading a PDF back is not something the engine does — it writes them. This is
+# only ever used to put the fragments of one sharded render into one file, and
+# `default-features = false` keeps it to the parser and the writer.
+lopdf = { version = "0.34.0", default-features = false, features = ["nom_parser"] }

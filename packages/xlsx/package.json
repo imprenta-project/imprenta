@@ -1,45 +1,32 @@
 {
   "name": "@imprentajs/xlsx",
   "version": "0.1.0-alpha.1",
-  "description": "Imprenta's spreadsheet writer, as a native Node addon.",
+  "description": "Imprenta's spreadsheet writer. One WebAssembly module, every runtime.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/imprenta-project/imprenta.git",
     "directory": "packages/xlsx"
   },
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "files": [
-    "index.js",
-    "index.d.ts",
-    "dist"
+    "dist",
+    "imprenta-xlsx.wasm"
   ],
   "publishConfig": {
     "access": "public"
   },
-  "napi": {
-    "binaryName": "imprenta-xlsx",
-    "targets": [
-      "x86_64-apple-darwin",
-      "aarch64-apple-darwin",
-      "x86_64-unknown-linux-gnu",
-      "aarch64-unknown-linux-gnu",
-      "x86_64-pc-windows-msvc"
-    ]
-  },
   "scripts": {
-    "build": "napi build --platform --release --manifest-path ../../crates/imprenta-xlsx-napi/Cargo.toml --output-dir . && tsc -p tsconfig.build.json",
-    "build:debug": "napi build --platform --manifest-path ../../crates/imprenta-xlsx-napi/Cargo.toml --output-dir . && tsc -p tsconfig.build.json",
+    "build": "node scripts/build.mjs && tsc -p tsconfig.build.json",
     "test": "vitest run",
     "check-types": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome format --write .",
     "format:check": "biome format .",
-    "clean": "rm -rf *.node index.js index.d.ts dist"
+    "clean": "rm -rf dist imprenta-xlsx.wasm"
   },
   "devDependencies": {
-    "@napi-rs/cli": "3.8.2",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",
@@ -50,12 +37,18 @@
   },
   "exports": {
     ".": {
-      "types": "./index.d.ts",
-      "default": "./index.js"
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     },
     "./stream": {
       "types": "./dist/stream.d.ts",
       "default": "./dist/stream.js"
+    },
+    "./imprenta-xlsx.wasm": "./imprenta-xlsx.wasm",
+    "./writer": {
+      "types": "./dist/writer.d.ts",
+      "default": "./dist/writer.js"
     }
-  }
+  },
+  "type": "module"
 }

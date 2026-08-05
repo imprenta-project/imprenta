@@ -67,6 +67,18 @@ pub struct Painted {
     pub footer: Option<Content>,
 }
 
+/// Where one page of a planned document begins and ends, and what the running
+/// totals stood at when it opened.
+///
+/// Atoms rather than rows, because the packer has never heard of a row. The
+/// caller that fed the atoms knows which of its rows each one came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PagePlan {
+    pub first_atom: usize,
+    pub last_atom: usize,
+    pub opening: Vec<f64>,
+}
+
 /// A finished document and what each of its pages totalled.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Composed {
@@ -105,8 +117,11 @@ pub struct Composer {
 
     /// Whether nothing may be painted until the last page is packed.
     hold: bool,
-    /// Known only once nothing more can arrive.
+    /// Known only once nothing more can arrive — unless a fragment was told.
     total: Option<usize>,
+    /// The number this composer's first page carries. One, unless this is a
+    /// piece of a document some other composer began.
+    first_page: usize,
 }
 
 impl Composer {
@@ -134,13 +149,46 @@ impl Composer {
             totals: Vec::new(),
             hold: false,
             total: None,
+            first_page: 1,
         })
     }
 
+    /// Composes a piece of a document some other composer began.
+    ///
+    /// This is what lets one document be painted by several composers at once,
+    /// and the three arguments are exactly what a piece cannot work out for
+    /// itself: which page it starts on, how many there are in all, and what the
+    /// running totals stood at when the piece before it ended.
+    ///
+    /// Being told the total also means a fragment never has to
+    /// [`hold`](Self::holding_pages) its pages the way a whole document
+    /// printing `{{pages}}` does — the total is the only thing holding buys,
+    /// and here it arrives up front. A sharded render therefore stays flat in
+    /// memory even when every page carries "3 of 12".
+    ///
+    /// Nothing here changes pagination. A piece produces the pages the whole
+    /// document would have produced **only if it starts where a page started**,
+    /// which is why the planning pass runs first and why it packs rather than
+    /// estimating.
+    pub fn resuming(mut self, page: usize, total: usize, opening: Vec<f64>) -> Self {
+        self.first_page = page;
+        self.total = Some(total);
+        if !opening.is_empty() {
+            self.carried = opening;
+        }
+        self
+    }
+
     /// Declares how many running totals the document keeps.
+    ///
+    /// Totals a fragment was told to carry survive this, so the two builders
+    /// can be called in either order. They read naturally the other way round
+    /// and somebody will write them that way.
     pub fn with_accumulators(mut self, count: usize) -> Self {
         self.accumulators = count;
-        self.carried = vec![0.0; count];
+        if self.carried.len() != count {
+            self.carried = vec![0.0; count];
+        }
         self
     }
 
@@ -266,6 +314,30 @@ impl Composer {
         }
     }
 
+    /// Packs everything fed so far and says where the pages fall, painting
+    /// none of them.
+    ///
+    /// This is the pass that makes sharding possible. A document can only be
+    /// split across composers at a page boundary — split anywhere else and the
+    /// pieces repaginate, which is how a sharded render quietly grows pages
+    /// nobody asked for. So the boundaries are found first, by **packing**,
+    /// and packing is cheap: it sees heights and break flags, never text and
+    /// never fonts.
+    ///
+    /// It is the same `pack` a real render uses, reached the same way. A
+    /// second path that estimated page breaks would be a second paginator, and
+    /// the two would disagree on exactly the documents that matter.
+    pub fn plan(self) -> Vec<PagePlan> {
+        self.pack_pending()
+            .into_iter()
+            .map(|page| PagePlan {
+                first_atom: page.placements.first().map_or(0, |p| p.atom),
+                last_atom: page.placements.last().map_or(0, |p| p.atom),
+                opening: page.opening,
+            })
+            .collect()
+    }
+
     /// Paints what remains and returns the finished document.
     ///
     /// The totals come back with the bytes because `finish` is what paints
@@ -282,8 +354,12 @@ impl Composer {
     ) -> Result<Composed, RenderError> {
         let packed = self.pack_pending();
         // Only now can the total be known, which is the whole reason a
-        // document that prints one holds its pages.
-        self.total = Some(self.totals.len() + packed.len());
+        // document that prints one holds its pages. A fragment is the
+        // exception: it was told, and its own page count is a fraction of the
+        // document's.
+        if self.total.is_none() {
+            self.total = Some(self.totals.len() + packed.len());
+        }
         self.release(&packed, bands);
         Ok(Composed {
             pdf: self.sink.finish()?,
@@ -300,7 +376,7 @@ impl Composer {
             let contents = &self.contents;
             let prefixes = &self.prefixes;
             let painted = bands(&PageContext {
-                number: self.totals.len() + 1,
+                number: self.first_page + self.totals.len(),
                 total: self.total,
                 opening: page.opening.clone(),
                 closing: page.closing.clone(),
@@ -940,5 +1016,144 @@ mod bands {
         let out = composer.finish_with(&mut |_| Painted::default()).unwrap();
 
         assert!(out.pdf.starts_with(b"%PDF-"));
+    }
+
+    #[test]
+    fn a_resumed_composer_starts_where_it_was_told_to() {
+        // What lets one document be painted by several composers at once: each
+        // is told which page it begins on, how many there are in all, and what
+        // the running totals stood at when the piece before it ended. Without
+        // all three a fragment cannot number its own pages, and page numbers
+        // stamped on afterwards are the failure this engine exists to avoid.
+        let (fonts, mut shaper) = parts();
+        let mut composer = Composer::new(geometry(), fonts)
+            .unwrap()
+            .with_accumulators(1)
+            .resuming(5, 20, vec![1_200.0]);
+
+        for (atom, content) in rows(&mut shaper, 12) {
+            composer.push(atom, content);
+        }
+
+        let mut seen = Vec::new();
+        composer
+            .finish_with(&mut |page: &PageContext| {
+                seen.push((page.number, page.total, page.opening[0]));
+                Painted::default()
+            })
+            .unwrap();
+
+        assert_eq!(seen[0].0, 5, "the fragment begins on page five");
+        assert_eq!(seen[0].1, Some(20), "and knows there are twenty");
+        assert_eq!(
+            seen[0].2, 1_200.0,
+            "opening at what the piece before closed at"
+        );
+        for (i, page) in seen.iter().enumerate() {
+            assert_eq!(page.0, 5 + i, "page numbers run on without a gap");
+        }
+    }
+
+    #[test]
+    fn a_resumed_composer_can_paint_while_it_prints_even_with_a_total() {
+        // `holding_pages` exists because nothing can know the total until the
+        // last page is packed. A fragment is *told* the total, so it does not
+        // have to hold anything — which is the difference between a sharded
+        // render being flat in memory and not.
+        let (fonts, mut shaper) = parts();
+        let mut composer = Composer::new(geometry(), fonts)
+            .unwrap()
+            .resuming(1, 99, Vec::new());
+
+        for (atom, content) in rows(&mut shaper, 60) {
+            composer.push(atom, content);
+        }
+        composer.flush();
+
+        assert!(
+            composer.pages() > 0,
+            "a fragment that knows its total must still release pages as it goes"
+        );
+    }
+
+    #[test]
+    fn a_document_split_in_two_numbers_its_pages_as_one() {
+        // The property the whole sharded path rests on: two composers over
+        // halves of a document produce the same pages, in the same order, with
+        // the same numbers as one composer over the whole of it.
+        let (fonts, mut shaper) = parts();
+
+        let mut whole_numbers = Vec::new();
+        let mut whole = Composer::new(geometry(), fonts.clone()).unwrap();
+        let all = rows(&mut shaper, 60);
+        for (atom, content) in all.clone() {
+            whole.push(atom, content);
+        }
+        let whole_pages = whole
+            .finish_with(&mut |page: &PageContext| {
+                whole_numbers.push(page.number);
+                Painted::default()
+            })
+            .unwrap()
+            .totals
+            .len();
+
+        // Split exactly where the first composer put a page boundary, which is
+        // the only split that can produce the same pages — and the reason the
+        // sharded path plans before it paints.
+        let split = atoms_on_first_pages(geometry(), fonts.clone(), &all, whole_pages / 2);
+
+        let mut head = Composer::new(geometry(), fonts.clone()).unwrap();
+        for (atom, content) in all[..split].iter().cloned() {
+            head.push(atom, content);
+        }
+        let head_pages = head.finish().unwrap().totals.len();
+
+        let mut tail_numbers = Vec::new();
+        let mut tail = Composer::new(geometry(), fonts).unwrap().resuming(
+            head_pages + 1,
+            whole_pages,
+            Vec::new(),
+        );
+        for (atom, content) in all[split..].iter().cloned() {
+            tail.push(atom, content);
+        }
+        let tail_pages = tail
+            .finish_with(&mut |page: &PageContext| {
+                tail_numbers.push(page.number);
+                Painted::default()
+            })
+            .unwrap()
+            .totals
+            .len();
+
+        assert_eq!(
+            head_pages + tail_pages,
+            whole_pages,
+            "the same pages in all"
+        );
+        assert_eq!(
+            tail_numbers,
+            (head_pages + 1..=whole_pages).collect::<Vec<_>>(),
+            "the tail carries on numbering where the head stopped"
+        );
+    }
+
+    /// How many atoms land on the first `pages` pages of `all`, according to
+    /// the planning pass — which is what the sharded path uses too.
+    fn atoms_on_first_pages(
+        geometry: Geometry,
+        fonts: Fonts,
+        all: &[(Atom, Content)],
+        pages: usize,
+    ) -> usize {
+        let mut composer = Composer::new(geometry, fonts).unwrap();
+        for (atom, content) in all.iter().cloned() {
+            composer.push(atom, content);
+        }
+        composer
+            .plan()
+            .get(pages - 1)
+            .map_or(0, |page| page.last_atom + 1)
     }
 }

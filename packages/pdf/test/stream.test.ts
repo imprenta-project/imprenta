@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { render } from '../index.js';
-import { Printer } from '../src/stream.js';
+import { render } from '../dist/index.js';
+import { Printer } from '../dist/stream.js';
 
 const fixtures = fileURLToPath(new URL('../../../crates/imprenta-pdf/tests', import.meta.url));
 const font = (name: string) => readFileSync(join(fixtures, 'fonts', name));
@@ -50,7 +50,7 @@ describe('a document fed in pieces', () => {
     const fed = await stream(400, 50);
 
     expect(fed.pages).toBe(whole.pages);
-    expect(fed.pdf?.equals(whole.pdf)).toBe(true);
+    expect(Buffer.from(fed.pdf!).equals(Buffer.from(whole.pdf))).toBe(true);
   });
 
   it('does not care how the pieces are cut', async () => {
@@ -58,8 +58,8 @@ describe('a document fed in pieces', () => {
     // should reach the page.
     const [one, seven, all] = await Promise.all([stream(200, 1), stream(200, 7), stream(200, 200)]);
 
-    expect(one.pdf?.equals(seven.pdf as Buffer)).toBe(true);
-    expect(seven.pdf?.equals(all.pdf as Buffer)).toBe(true);
+    expect(Buffer.from(one.pdf!).equals(Buffer.from(seven.pdf as Buffer))).toBe(true);
+    expect(Buffer.from(seven.pdf!).equals(Buffer.from(all.pdf as Buffer))).toBe(true);
   });
 
   it('writes to a file without the bytes passing through the heap', async () => {
@@ -120,7 +120,7 @@ describe('a document with no table in it', () => {
     const fed = await printer.finish();
 
     expect(fed.pages).toBe(whole.pages);
-    expect(fed.pdf?.equals(whole.pdf)).toBe(true);
+    expect(Buffer.from(fed.pdf!).equals(Buffer.from(whole.pdf))).toBe(true);
   });
 
   it('holds no more than a table does', async () => {

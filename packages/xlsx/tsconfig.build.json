@@ -5,8 +5,8 @@
     "declaration": true,
     "outDir": "dist",
     "rootDir": "src",
-    "module": "CommonJS",
-    "moduleResolution": "Node"
+    "module": "ESNext",
+    "moduleResolution": "Bundler"
   },
   "include": ["src"]
 }

@@ -12,7 +12,7 @@ import { render } from '../src/xlsx/render.js';
  * invented arrives as nothing and every unit test still passes. That is not
  * hypothetical — it happened once already, on the PDF side, with a border.
  *
- * It needs a freshly built `@imprentajs/xlsx`. A stale addon makes this pass by
+ * It needs a freshly built `@imprentajs/xlsx`. A stale module makes this pass by
  * comparing two equally wrong workbooks.
  */
 
@@ -26,7 +26,10 @@ import { render } from '../src/xlsx/render.js';
  */
 async function through(element: React.ReactElement): Promise<{ bytes: Buffer }> {
   const { xlsx } = await write(await render(element));
-  return { bytes: xlsx };
+  // The writer hands back a `Uint8Array`, because `Buffer` is Node-only and
+  // the same module runs in a browser. The assertions below read XML out of
+  // the package, which wants the string helpers `Buffer` has.
+  return { bytes: Buffer.from(xlsx) };
 }
 
 describe('React to a spreadsheet', () => {

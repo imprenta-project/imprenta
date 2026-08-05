@@ -3,11 +3,11 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "lib": ["ES2023"],
+    "lib": ["ES2023", "DOM"],
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src", "test", "index.d.ts"]
+  "include": ["src", "test"]
 }

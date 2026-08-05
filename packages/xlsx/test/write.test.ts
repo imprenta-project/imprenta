@@ -2,8 +2,8 @@ import { readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { write, writeToFile } from '../index.js';
-import { Book } from '../src/stream.js';
+import { write, writeToFile } from '../dist/index.js';
+import { Book } from '../dist/stream.js';
 
 const text = (v: string) => ({ value: { t: 'text', v } });
 const number = (v: number) => ({ value: { t: 'number', v } });
@@ -24,7 +24,7 @@ describe('write', () => {
 
     expect(sheets).toBe(1);
     expect(bytes).toBeGreaterThan(0);
-    expect(xlsx.subarray(0, 2).toString()).toBe('PK');
+    expect(Buffer.from(xlsx.subarray(0, 2)).toString()).toBe('PK');
     expect(xlsx.length).toBe(bytes);
   });
 
@@ -91,7 +91,7 @@ describe('Book', () => {
     const first = book.rows(ledger(2000));
     const second = book.rows(ledger(1));
 
-    await expect(Promise.all([first, second])).rejects.toThrow(/already running/);
+    await expect(Promise.all([first, second])).rejects.toThrow(/await the previous call/);
   });
 
   it('says so when the workbook has already been finished', async () => {
@@ -121,7 +121,7 @@ describe('Book', () => {
     const { xlsx } = await book.finish();
 
     expect(xlsx).toBeDefined();
-    expect(xlsx?.subarray(0, 2).toString()).toBe('PK');
+    expect(Buffer.from(xlsx!.subarray(0, 2)).toString()).toBe('PK');
   });
 
   it('writes to a file and hands back its size rather than its bytes', async () => {
@@ -131,7 +131,7 @@ describe('Book', () => {
       await book.rows(ledger(1000));
       const done = await book.finish();
 
-      expect(done.xlsx).toBeUndefined();
+      expect(done.xlsx).toBeNull();
       expect(readFileSync(path).length).toBe(done.bytes);
     } finally {
       rmSync(path, { force: true });

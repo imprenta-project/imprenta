@@ -135,7 +135,7 @@ tree walk — and what comes out is the IR, not HTML. `<Text>` flattens what is
 nested inside it into styled runs, joining neighbours that match so that where
 JSX split a string never reaches the shaper.
 
-`@imprentajs/react` depends on React and nothing else — not on the native addon —
+`@imprentajs/react` depends on React and nothing else — not on the engine —
 so a document can be declared anywhere, including where the engine is not
 installed.
 
@@ -286,6 +286,47 @@ worse. One item per batch takes 2.5 s on the ledger and 1.98 s on the
 transcript, because the hop to the engine's thread dominates; a hundred takes
 1.35 and 1.44; a thousand takes 1.33 and 1.50; ten thousand buys nothing and
 doubles the heap. Anywhere from a hundred to a thousand.
+
+### From the browser, the edge, or Alpine
+
+The engine is **one WebAssembly module that imports nothing at all** — no
+Node-API, no WASI, no shim — so the same file runs wherever there is a
+`WebAssembly.instantiate`: Node, the browser, Deno, Bun, an edge worker, and
+every platform a native build matrix leaves out. musl, which is to say Alpine,
+which is to say a great many Docker images.
+
+On a server the calls above already do the right thing: they go to a worker, so
+nothing blocks the thread that answers requests. In a browser there is no
+worker to hide behind and no filesystem to read the module from, so reach for
+the engine directly and hand it the bytes:
+
+```ts
+import { Engine } from '@imprentajs/pdf/engine';
+
+const engine = await Engine.load({
+  wasm: await (await fetch(new URL('@imprentajs/pdf/imprenta-pdf.wasm', import.meta.url))).arrayBuffer(),
+  fonts: [{ data: new Uint8Array(await (await fetch('/Roboto.ttf')).arrayBuffer()) }],
+});
+
+const { pdf, pages } = engine.render(ir);   // synchronous: put it in a Worker
+```
+
+No cross-origin isolation, no `SharedArrayBuffer`, no COOP/COEP headers. The
+spreadsheet writer is the same shape, as `@imprentajs/xlsx/writer`.
+
+**Speed.** A WebAssembly module has no threads, so one engine renders on one
+core. The pool gets the cores back — across documents by dispatching them, and
+within one long document by splitting it into page ranges, painting them at
+once and merging the result. On 150,000 rows over 2,113 pages, twelve cores:
+
+| | |
+|---|---:|
+| one engine | 2,840 ms |
+| **split across twelve** | **500 ms** |
+| the native addon this replaced | 696 ms |
+
+Same page count, same numbering, one file — the split is planned before
+anything is painted, so no page is renumbered afterwards.
 
 ### From the command line
 
@@ -511,9 +552,9 @@ from the start:
 crates/
   imprenta-core/   units, colour, diagnostics, IR envelope — format-neutral
   imprenta-pdf/    the engine: measure, pack, paint, and the declared IR
-  imprenta-pdf-napi/   the Node binding
+  imprenta-pdf-wasm/   the WebAssembly module; imports nothing
 packages/
-  pdf/             @imprentajs/pdf   — the native addon, and the streaming Printer
+  pdf/             @imprentajs/pdf   — the module, its worker pool and the Printer
   react/           @imprentajs/react — declare a document in React
   fonts/           @imprentajs/fonts — fetch and cache the faces it is set in
   cli/             @imprentajs/cli   — init, the preview, and the build
@@ -539,9 +580,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```
 
-`@imprentajs/pdf` is compiled from `crates/imprenta-pdf-napi`, so **after any change
-to Rust, rebuild it before trusting a Node test** — a stale binary makes tests
-pass by comparing two documents that are both wrong:
+`@imprentajs/pdf` is compiled from `crates/imprenta-pdf-wasm`, so **after any
+change to Rust, rebuild it before trusting a Node test** — a stale module makes
+tests pass by comparing two documents that are both wrong:
 
 ```bash
 pnpm --filter @imprentajs/pdf build
