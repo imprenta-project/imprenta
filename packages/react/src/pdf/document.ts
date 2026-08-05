@@ -147,8 +147,8 @@ function block(node: HostNode, theme: Theme): IrNode {
       return irNode({
         t: 'table',
         columns: (props.columns as Record<string, unknown>[]).map(column),
-        header: props.header,
-        rows: props.rows,
+        header: props.header === undefined ? undefined : tableRow(props.header, theme),
+        rows: (props.rows as Record<string, unknown>[]).map((one) => tableRow(one, theme)),
         repeatHeader: props.repeatHeader,
         padding: edges(props.padding),
         spaceAfter: props.spaceAfter,
@@ -355,6 +355,26 @@ function border(
 
 function column(spec: Record<string, unknown>): Record<string, unknown> {
   return prune({ ...spec, width: length(spec.width) }) ?? {};
+}
+
+/**
+ * A table row, with its style resolved the way a box's is.
+ *
+ * `RowProps.style` is a box's props, and it used to be handed to the engine
+ * exactly as written: a colour string where the engine holds a border per
+ * side, one number where it holds four, and a `className` nobody looked at.
+ * Two of the fields — `background` and `radius` — happen to have the same
+ * shape on both sides, which is why this looked like it worked.
+ */
+function tableRow(row: unknown, theme: Theme): Record<string, unknown> {
+  const { style, ...rest } = row as Record<string, unknown> & {
+    style?: Record<string, unknown>;
+  };
+
+  return prune({
+    ...rest,
+    style: style === undefined ? undefined : boxStyle(style, theme),
+  }) as Record<string, unknown>;
 }
 
 /**

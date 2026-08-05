@@ -187,6 +187,45 @@ describe('the elements', () => {
 });
 
 describe('tables and lists', () => {
+  it('resolves a row style exactly as it resolves a box style', async () => {
+    // `RowProps.style` is typed as a box's props and an author is entitled to
+    // read that literally: the three words that draw a hairline under a box
+    // have to draw one under a row. They used to reach the engine untouched —
+    // a colour where it holds a border per side, a number where it holds four
+    // — so the document could not be read at all, and a `className` on a row
+    // was dropped without a word. `background` and `radius` happened to work,
+    // which is what made it look like the rest did too.
+    const style = {
+      border: '#D1D5DB',
+      borderWidth: 0.5,
+      borderSides: ['bottom'] as ('top' | 'right' | 'bottom' | 'left')[],
+      padding: 4,
+      className: 'bg-slate-100',
+    };
+
+    const document = await toDocument(
+      <Document>
+        <Box {...style}>
+          <Text>x</Text>
+        </Box>
+        <Table
+          columns={[{ width: 'auto' }]}
+          header={{ style, cells: [{ text: 'Cabecera' }] }}
+          rows={[{ style, cells: [{ text: 'Fila' }] }]}
+        />
+      </Document>,
+    );
+
+    const box = document.children[0] as unknown as { style: unknown };
+    const table = document.children[1] as unknown as {
+      header: { style: unknown };
+      rows: { style: unknown }[];
+    };
+
+    expect(table.rows[0].style).toEqual(box.style);
+    expect(table.header.style).toEqual(box.style);
+  });
+
   it('passes a table through as the engine declares it', async () => {
     const document = await toDocument(
       <Document>
