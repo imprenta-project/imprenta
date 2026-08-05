@@ -1,5 +1,7 @@
 # @imprentajs/fonts
 
+## 0.1.0-alpha.3
+
 ## 0.1.0-alpha.2
 
 ### Minor Changes
