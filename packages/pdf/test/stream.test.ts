@@ -146,7 +146,15 @@ describe('a document with no table in it', () => {
   });
 });
 
-describe('what it costs', () => {
+// Every assertion below is about memory or about scheduling, and not one of
+// them is about speed — but two push 60,000 rows through the engine, which on
+// a loaded CI runner is enough to cross vitest's default five seconds. That
+// has already failed a commit that touched none of this code, and a timeout
+// reads as a broken engine rather than as a busy machine. The budget is
+// deliberately far larger than the work: it is here to catch a hang, not to
+// time anything. If a real regression makes these tests slow, the numbers
+// they assert are what should catch it.
+describe('what it costs', { timeout: 60_000 }, () => {
   it('holds about a page however long the document gets', async () => {
     // The number the whole design exists to keep flat. Not a threshold: the
     // claim is that it does not move, and a threshold would pass for a
