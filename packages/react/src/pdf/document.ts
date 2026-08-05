@@ -311,7 +311,15 @@ function textStyle(
     widows: props.widows,
     orphans: props.orphans,
     spaceAfter: props.spaceAfter ?? styled.spaceAfter,
+    // Left is what a paragraph does anyway, so it is not written down: the IR
+    // carries what was asked for rather than what was defaulted.
+    align: alignment(props.align ?? styled.align),
   });
+}
+
+/** `start` is the engine's default, so saying it adds a field and nothing else. */
+function alignment(align: unknown): string | undefined {
+  return align === undefined || align === 'start' ? undefined : (align as string);
 }
 
 function boxStyle(

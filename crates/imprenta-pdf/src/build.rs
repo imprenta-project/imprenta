@@ -17,7 +17,7 @@ use crate::ir;
 use crate::list::{List, Marker};
 use crate::render::{Bands, Fonts, Geometry, Options, RenderError};
 use crate::shape::{Face, Shaper, TextRun, Weight, report_missing};
-use crate::table::{Align, Cell, Column, Layout, Overflow};
+use crate::table::{Align, Cell, Column, Layout, Overflow, Track, offset_within};
 use imprenta_core::diagnostic::Diagnostics;
 use imprenta_core::units::{Edges, Pt};
 use std::collections::HashMap;
@@ -532,8 +532,10 @@ impl Compose<'_> {
                 let mut boxed = BoxContent::default()
                     .with_width(width)
                     .with_padding(Edges::bottom(text.style.space_after));
+                let track = Track { x: Pt(0.0), width };
                 for line in self.shaper.break_rich(&shaped, text.style.size, width) {
-                    boxed = boxed.stack(Content::Text(line));
+                    let shift = offset_within(track, line.width, align_of(text.style.align));
+                    boxed = boxed.stack_at(shift, Content::Text(line));
                 }
                 Content::Box(boxed)
             }
@@ -576,14 +578,25 @@ impl Compose<'_> {
         check_corners(&c.style, self.diagnostics);
         let boxed = BoxContent::new(decoration_of(&c.style))
             .with_width(outer)
-            .with_padding(c.style.padding.plus_bottom(c.style.space_after));
+            .with_padding(c.style.padding);
 
-        Ok(Content::Box(self.fill(
-            boxed,
-            &c.children,
-            inner,
-            side_by_side,
-        )?))
+        let filled = self.fill(boxed, &c.children, inner, side_by_side)?;
+        if c.style.space_after.get() == 0.0 {
+            return Ok(Content::Box(filled));
+        }
+
+        // The space below goes *outside* the decoration, in a plain box that
+        // wraps it. Folded into the container's own padding — which is what
+        // used to happen here, and still happens for a paragraph a few lines
+        // up — a background stretches over the gap: the author asks for room
+        // after the box and gets a taller box. A paragraph has nothing painted
+        // behind it, which is why the shortcut is safe there and not here.
+        Ok(Content::Box(
+            BoxContent::default()
+                .with_width(outer)
+                .with_padding(Edges::bottom(c.style.space_after))
+                .stack(Content::Box(filled)),
+        ))
     }
 
     /// Puts children into a container, beside one another or stacked.
@@ -736,6 +749,14 @@ impl Walk<'_> {
         let count = lines.len();
         for (i, line) in lines.into_iter().enumerate() {
             let mut atom = Atom::new(line.height);
+            // Set against the left edge a line needs nothing around it, which
+            // is the case that matters: a ledger of fifty thousand pages is
+            // all left-aligned, and a box per line would be a box per line.
+            let shift = offset_within(
+                Track { x: Pt(0.0), width },
+                line.width,
+                align_of(style.align),
+            );
             // Widow and orphan limits reduce to keep-with-next; see
             // `crate::widows` for why the packer never learns about them.
             let head = (style.orphans.saturating_sub(1) as usize).min(count.saturating_sub(1));
@@ -744,7 +765,18 @@ impl Walk<'_> {
             if style.keep_with_next && i + 1 == count {
                 atom.keep_with_next = true;
             }
-            self.emit(atom, Content::Text(line));
+            if shift.get() == 0.0 {
+                self.emit(atom, Content::Text(line));
+            } else {
+                self.emit(
+                    atom,
+                    Content::Box(
+                        BoxContent::default()
+                            .with_width(width)
+                            .stack_at(shift, Content::Text(line)),
+                    ),
+                );
+            }
         }
         self.spacer(style.space_after);
     }
@@ -928,6 +960,19 @@ impl Walk<'_> {
 /// flushes on, so a batch of a thousand rows is a handful of pages either way.
 const MEASURE_BATCH: usize = 1_024;
 
+/// The declared alignment, as the layout names it.
+///
+/// Two enums for one idea, and they stay two: the IR is the contract with
+/// whoever produced the document and the layout is the engine's own, so
+/// neither gets to move because the other did.
+fn align_of(align: ir::Align) -> Align {
+    match align {
+        ir::Align::Start => Align::Start,
+        ir::Align::End => Align::End,
+        ir::Align::Center => Align::Center,
+    }
+}
+
 /// One declared column, as the layout wants it.
 ///
 /// Shared by the walk and by [`measure_rows`]: a planner that resolved a
@@ -935,11 +980,7 @@ const MEASURE_BATCH: usize = 1_024;
 /// found would be right for a document nobody asked for.
 fn column_of(spec: &ir::ColumnSpec) -> Column {
     Column::new(spec.width)
-        .aligned(match spec.align {
-            ir::Align::Start => Align::Start,
-            ir::Align::End => Align::End,
-            ir::Align::Center => Align::Center,
-        })
+        .aligned(align_of(spec.align))
         .overflowing(match spec.overflow {
             ir::Overflow::Wrap => Overflow::Wrap,
             ir::Overflow::Ellipsis => Overflow::Ellipsis,
@@ -2002,6 +2043,163 @@ mod tests {
         assert!(
             ops.contains("184.01575 34.015747 m"),
             "the second panel is not beside the first"
+        );
+    }
+
+    #[test]
+    fn a_paragraph_can_be_set_against_its_right_edge() {
+        // Alignment existed only on a table column, so the one way to put a
+        // figure against the right margin was to make it a table. An invoice
+        // is full of things that are not tables and still have to line up on
+        // the right — a company address, a total in its own box — and there
+        // was no way to say so.
+        //
+        // Asserted in coordinates: a paragraph that merely came out narrower
+        // would satisfy anything softer than this.
+        let aligned = |align| {
+            ir::Node::Text(ir::Text {
+                runs: vec![ir::Run::new("xx")],
+                style: ir::TextStyle {
+                    align,
+                    ..Default::default()
+                },
+            })
+        };
+
+        let plain = Options { compress: false };
+        let start =
+            build(&document(vec![aligned(ir::Align::Start)]), &assets(), plain).expect("build");
+        let end = build(&document(vec![aligned(ir::Align::End)]), &assets(), plain).expect("build");
+
+        let at = |pdf: &[u8]| {
+            let text = String::from_utf8_lossy(pdf).into_owned();
+            let marker = text.find(" Tm").expect("nothing was painted");
+            let head = &text[..marker];
+            head[head.rfind('\n').map_or(0, |n| n + 1)..].to_string()
+        };
+
+        // The left margin is 34.02, and that is where a paragraph starts
+        // today. Set against the right edge it has to start further in; still
+        // at the margin means the alignment was dropped on the way through.
+        assert!(at(&start.pdf).contains("34.015747"), "{}", at(&start.pdf));
+        assert!(
+            !at(&end.pdf).contains("34.015747"),
+            "the paragraph is still at the left margin: {}",
+            at(&end.pdf)
+        );
+    }
+
+    #[test]
+    fn a_paragraph_is_aligned_inside_a_box_and_inside_a_band_too() {
+        // The test above walks a paragraph at the top level, and walking is
+        // the one path alignment was *not* added for: a table could already
+        // align, and the reason this exists is everything a table cannot be
+        // nested inside — a header, a footer, a box with a background. Those
+        // are composed, not walked, and composing is a separate piece of code.
+        //
+        // A `<Row>` was left untaught in exactly that seam and stacked its
+        // children wherever it was nested, with no diagnostic and a document
+        // that rendered. So the two paths are pinned together here rather than
+        // assumed to agree.
+        let aligned = |align| {
+            ir::Node::Text(ir::Text {
+                runs: vec![ir::Run::new("xx")],
+                style: ir::TextStyle {
+                    align,
+                    ..Default::default()
+                },
+            })
+        };
+        let nested = |align| ir::Document {
+            page: ir::PageSetup::default(),
+            header: Some(ir::Band {
+                height: Pt(60.0),
+                children: vec![aligned(align)],
+            }),
+            footer: None,
+            accumulators: Vec::new(),
+            children: vec![ir::Node::Box(ir::Container {
+                style: ir::BoxStyle::default(),
+                children: vec![aligned(align)],
+            })],
+        };
+
+        // Every text matrix in the file, not the first: one paragraph is in
+        // the band and one is in the box, and a check that looked at either
+        // alone would pass while the other was dropped.
+        let placings = |pdf: &[u8]| {
+            let text = String::from_utf8_lossy(pdf).into_owned();
+            text.match_indices(" Tm")
+                .map(|(at, _)| {
+                    let head = &text[..at];
+                    head[head.rfind('\n').map_or(0, |n| n + 1)..].to_string()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let plain = Options { compress: false };
+        let start = build(&nested(ir::Align::Start), &assets(), plain).expect("build");
+        let end = build(&nested(ir::Align::End), &assets(), plain).expect("build");
+
+        let left = placings(&start.pdf);
+        let right = placings(&end.pdf);
+        assert_eq!(left.len(), 2, "expected the band and the box: {left:?}");
+        assert_eq!(right.len(), 2, "expected the band and the box: {right:?}");
+        assert!(
+            left.iter().all(|line| line.contains("34.015747")),
+            "{left:?}"
+        );
+        assert!(
+            right.iter().all(|line| !line.contains("34.015747")),
+            "a nested paragraph is still at the left margin: {right:?}"
+        );
+    }
+
+    #[test]
+    fn space_after_a_composed_box_falls_outside_its_background() {
+        // At the top level the space below a box is a spacer emitted after it.
+        // Composed — in a band, or inside another container — it was folded
+        // into the box's own bottom padding instead, so a box with a
+        // background grew by exactly that much and whatever followed stayed
+        // welded to it. The author asked for a gap and got a taller box.
+        //
+        // A paragraph is the case the folding was written for and it is right
+        // there: text has nothing painted behind it. A decorated container
+        // does, and that is the whole difference.
+        let grey = ir::Node::Box(ir::Container {
+            style: ir::BoxStyle {
+                background: Some(Color::BLACK),
+                space_after: Pt(16.0),
+                ..Default::default()
+            },
+            children: vec![paragraph("x")],
+        });
+
+        let document = ir::Document {
+            page: ir::PageSetup::default(),
+            header: Some(ir::Band {
+                height: Pt(90.0),
+                children: vec![grey, paragraph("y")],
+            }),
+            footer: None,
+            accumulators: Vec::new(),
+            children: vec![paragraph("z")],
+        };
+
+        let built = build(&document, &assets(), Options { compress: false }).expect("build");
+        let ops = String::from_utf8_lossy(&built.pdf);
+
+        // One line of 10pt text is 12pt tall and the top margin is 34.02, so
+        // the filled rectangle ends at 46.02. Sixteen points folded into the
+        // padding would take it to 62.02, and the rectangle is the only place
+        // the difference shows.
+        assert!(
+            ops.contains("46.015747 l"),
+            "the background is not the height of its content"
+        );
+        assert!(
+            !ops.contains("62.015747 l"),
+            "the background covers the gap that was meant to follow it"
         );
     }
 }

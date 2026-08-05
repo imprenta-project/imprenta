@@ -315,6 +315,13 @@ pub struct TextStyle {
     /// Keeps the paragraph with whatever follows — a heading with its text.
     #[serde(default)]
     pub keep_with_next: bool,
+    /// Which edge of its box the lines are set against.
+    ///
+    /// The same `Align` a table column uses, and deliberately so: an amount
+    /// under a table has to line up with the amounts in it, and two notions of
+    /// "the right edge" would eventually disagree by a fraction of a point.
+    #[serde(default)]
+    pub align: Align,
 }
 
 impl Default for TextStyle {
@@ -326,6 +333,7 @@ impl Default for TextStyle {
             widows: 2,
             space_after: Pt(0.0),
             keep_with_next: false,
+            align: Align::Start,
         }
     }
 }

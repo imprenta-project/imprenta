@@ -186,6 +186,31 @@ describe('the elements', () => {
   });
 });
 
+describe('alignment', () => {
+  it('sets a paragraph against the edge it was told to', async () => {
+    // Alignment lived only on a table column, so a figure could only be put
+    // against the right margin by making it a table. `text-right` is the way
+    // an author will reach for it, and the prop is the way TypeScript checks
+    // it; both have to arrive as the same word the engine reads.
+    const document = await toDocument(
+      <Document>
+        <Text align="end">por la prop</Text>
+        <Text className="text-right">por la clase</Text>
+        <Text>sin decir nada</Text>
+      </Document>,
+    );
+
+    const styleOf = (at: number) =>
+      (document.children[at] as unknown as { style?: { align?: string } }).style;
+
+    expect(styleOf(0)?.align).toBe('end');
+    expect(styleOf(1)?.align).toBe('end');
+    // Left is what a paragraph does anyway, so it is not written down: the IR
+    // carries what was asked for, not what was defaulted.
+    expect(styleOf(2)?.align).toBeUndefined();
+  });
+});
+
 describe('tables and lists', () => {
   it('resolves a row style exactly as it resolves a box style', async () => {
     // `RowProps.style` is typed as a box's props and an author is entitled to

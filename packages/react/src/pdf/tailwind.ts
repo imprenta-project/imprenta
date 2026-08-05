@@ -25,6 +25,7 @@ export interface Resolved {
   borderSides?: ('top' | 'right' | 'bottom' | 'left')[];
   radius?: number;
   spaceAfter?: number;
+  align?: 'start' | 'end' | 'center';
 }
 
 /**
@@ -48,6 +49,19 @@ export function resolve(classes: string, theme: Theme = {}): Resolved {
 }
 
 const SIDES = { t: 'top', r: 'right', b: 'bottom', l: 'left' } as const;
+
+/**
+ * Tailwind spells alignment with the same utility as size and colour, so
+ * `text-right` has to be recognised before `right` is looked up as either and
+ * reported as neither.
+ */
+const ALIGNMENTS: Record<string, 'start' | 'end' | 'center' | undefined> = {
+  left: 'start',
+  right: 'end',
+  center: 'center',
+  start: 'start',
+  end: 'end',
+};
 
 function apply(name: string, theme: Theme, out: Resolved): void {
   refuseVariant(name, 'a printed page');
@@ -73,6 +87,10 @@ function apply(name: string, theme: Theme, out: Resolved): void {
         : 'regular';
       return;
     }
+
+    case utility === 'text' && ALIGNMENTS[suffix ?? ''] !== undefined:
+      out.align = ALIGNMENTS[suffix as string];
+      return;
 
     case utility === 'text': {
       if (written !== undefined) {

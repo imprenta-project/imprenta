@@ -58,6 +58,13 @@ export interface DocumentProps extends Styled {
 export interface TextProps extends Styled {
   size?: number;
   color?: string;
+  /**
+   * Which edge of its box the lines are set against.
+   *
+   * The same three words a table column takes, so that an amount under a
+   * table lines up with the amounts in it.
+   */
+  align?: 'start' | 'end' | 'center';
   /** Minimum lines carried to the top of a page. */
   widows?: number;
   /** Minimum lines left at the foot of one. */
