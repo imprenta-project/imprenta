@@ -145,10 +145,12 @@ describe('check', () => {
           {
             t: 'table',
             columns: [{}],
-            header: {
-              cells: [{ text: 'Ref.', color: '#94a3b8' }],
-              style: { background: '#cbd5e1' },
-            },
+            header: [
+              {
+                cells: [{ text: 'Ref.', color: '#94a3b8' }],
+                style: { background: '#cbd5e1' },
+              },
+            ],
             rows: [],
           },
         ]),

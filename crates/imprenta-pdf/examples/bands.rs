@@ -87,7 +87,7 @@ fn main() {
                     ..Default::default()
                 },
             ],
-            header: Some(ir::Row {
+            header: vec![ir::Row {
                 cells: vec![
                     ir::Cell::new("Fecha"),
                     ir::Cell::new("Concepto"),
@@ -98,7 +98,7 @@ fn main() {
                     ..Default::default()
                 },
                 ..Default::default()
-            }),
+            }],
             rows: (0..180)
                 .map(|i| ir::Row {
                     cells: vec![

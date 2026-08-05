@@ -534,6 +534,7 @@ impl Compose<'_> {
                     .with_padding(Edges::bottom(text.style.space_after));
                 let track = Track { x: Pt(0.0), width };
                 let mut lines = self.shaper.break_rich(&shaped, text.style.size, width);
+                report_overflow(&lines, width, self.diagnostics);
                 justify(&mut lines, text.style.align, width);
                 for line in lines {
                     let shift = offset_within(track, line.width, align_of(text.style.align));
@@ -769,6 +770,7 @@ impl Walk<'_> {
         if lines.is_empty() {
             return;
         }
+        report_overflow(&lines, width, self.diagnostics);
         justify(&mut lines, style.align, width);
 
         let count = lines.len();
@@ -894,12 +896,22 @@ impl Walk<'_> {
         // Indices come back from `push`, which returns absolute ones. Deriving
         // them from a pending count would be wrong the moment the composer
         // released a page mid-table.
-        let header = head.header.as_ref().map(|row| {
-            let built = self.row(&layout, row, head.padding, Pt(9.0));
-            let height = built.height();
+        //
+        // However many rows the header has, they become **one** atom. A
+        // repeated prefix is one indivisible block by definition, so widening
+        // the header from one row to several costs the packer, the painter and
+        // the streaming composer exactly nothing: they still see one atom with
+        // one height, and never learn there was a second row.
+        let header = (!head.header.is_empty()).then(|| {
+            let mut stacked = BoxContent::default();
+            for row in &head.header {
+                stacked =
+                    stacked.stack(Content::Box(self.row(&layout, row, head.padding, Pt(9.0))));
+            }
+            let height = stacked.height();
             let mut atom = Atom::new(height);
             atom.keep_with_next = true;
-            (self.emit(atom, Content::Box(built)), height)
+            (self.emit(atom, Content::Box(stacked)), height)
         });
 
         // Declared before the rows arrive, not after. A ledger is one table
@@ -984,6 +996,61 @@ impl Walk<'_> {
 /// than the document. Two hundred and fifty-six atoms is what the composer
 /// flushes on, so a batch of a thousand rows is a handful of pages either way.
 const MEASURE_BATCH: usize = 1_024;
+
+/// Warns about a line that came out wider than the measure it was broken to.
+///
+/// It happens when nothing in the line can be broken — a URL, a reference
+/// code, an IBAN written without spaces — and what the engine does then is
+/// paint it past the edge of its box. Until this existed, nothing said so: the
+/// page looked deliberate and a line of it was over the side, which is the
+/// failure this project is most careful about.
+///
+/// The engine is the only place it can be caught. The checks in the CLI read
+/// the IR and have no fonts, so they can tell that a *declared* width is wider
+/// than the page and never that a *measured* line is.
+///
+/// A table cell has had this all along, as `cell-overflow` in [`crate::table`];
+/// the two are the same idea in the two places text is measured, and the names
+/// are a pair on purpose.
+///
+/// One report per paragraph, naming the widest line: a warning per line of a
+/// long paragraph is a warning nobody reads.
+fn report_overflow(lines: &[crate::shape::Line], width: Pt, diagnostics: &mut Diagnostics) {
+    // The same slack the packer allows, and for the same reason: a width that
+    // is a sum of f32 advances lands a hair either side of the exact total.
+    const SLACK: f32 = 1e-3;
+
+    let Some(worst) = lines
+        .iter()
+        .filter(|line| line.width.get() > width.get() + SLACK)
+        .max_by(|a, b| a.width.get().total_cmp(&b.width.get()))
+    else {
+        return;
+    };
+
+    let mut glyphs = worst.glyphs();
+    let text = match (glyphs.next(), worst.glyphs().last()) {
+        (Some(first), Some(last)) => worst
+            .text
+            .get(first.text_range.start as usize..last.text_range.end as usize)
+            .unwrap_or_default(),
+        _ => "",
+    };
+    let shown: String = text.chars().take(40).collect();
+
+    diagnostics.report(
+        imprenta_core::diagnostic::Diagnostic::warning(
+            "text-overflow",
+            format!(
+                "{:?} is {:.0}pt wide where {:.0}pt were available, so it is painted outside its box",
+                shown,
+                worst.width.get(),
+                width.get()
+            ),
+        )
+        .with_hint("nothing in it can be broken — give it more room, a smaller size, or break it yourself"),
+    );
+}
 
 /// Stretches every line but the last, when the paragraph asked to be justified.
 ///
@@ -1356,10 +1423,10 @@ mod tests {
                     align: ir::Align::Start,
                     overflow: ir::Overflow::Wrap,
                 }],
-                header: Some(ir::Row {
+                header: vec![ir::Row {
                     cells: vec![ir::Cell::new("CABECERA")],
                     ..Default::default()
-                }),
+                }],
                 rows: rows.clone(),
                 repeat_header: repeat,
                 padding: Edges::all(Pt(2.0)),
@@ -1397,10 +1464,10 @@ mod tests {
                     align: ir::Align::Start,
                     overflow: ir::Overflow::Wrap,
                 }],
-                header: Some(ir::Row {
+                header: vec![ir::Row {
                     cells: vec![ir::Cell::new("CABECERA")],
                     ..Default::default()
-                }),
+                }],
                 rows: (0..300)
                     .map(|i| ir::Row {
                         cells: vec![ir::Cell::new(format!("fila {i}"))],
@@ -1430,7 +1497,7 @@ mod tests {
                 align: ir::Align::End,
                 overflow: ir::Overflow::Wrap,
             }],
-            header: None,
+            header: Vec::new(),
             rows: (0..200)
                 .map(|i| ir::Row {
                     cells: vec![ir::Cell::new(format!("{i}"))],
@@ -1460,7 +1527,7 @@ mod tests {
                 align: ir::Align::Start,
                 overflow: ir::Overflow::Ellipsis,
             }],
-            header: None,
+            header: Vec::new(),
             rows: vec![ir::Row {
                 cells: vec![ir::Cell::new(
                     "Prestación de servicios profesionales durante el periodo",
@@ -1655,7 +1722,7 @@ mod tests {
     fn ledger_head() -> ir::TableHead {
         ir::TableHead {
             columns: vec![ir::ColumnSpec::default(), ir::ColumnSpec::default()],
-            header: None,
+            header: Vec::new(),
             repeat_header: true,
             padding: Edges::default(),
             space_after: Pt(0.0),
@@ -2349,6 +2416,145 @@ mod tests {
             String::from_utf8_lossy(&ragged.pdf),
             String::from_utf8_lossy(&flush.pdf),
             "the band came out identical, so nothing in it was justified"
+        );
+    }
+
+    /// A URL: the engine breaks it at a slash or a query mark, and then runs
+    /// out of places to break.
+    const UNBREAKABLE: &str =
+        "https://example.invalid/verify?ref=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+
+    #[test]
+    fn text_too_wide_for_its_box_says_so() {
+        // It is painted outside the box, and until now nothing said a word:
+        // the page looked deliberate and a line of it was over the edge. Only
+        // the engine can see this — the checks in the CLI read the IR and have
+        // no fonts, so they can tell a *declared* width is too big and never a
+        // measured one.
+        let boxed = ir::Node::Box(ir::Container {
+            style: ir::BoxStyle {
+                width: Some(Pt(120.0)),
+                ..Default::default()
+            },
+            children: vec![ir::Node::Text(ir::Text {
+                runs: vec![ir::Run::new(UNBREAKABLE)],
+                style: ir::TextStyle::default(),
+            })],
+        });
+
+        let built = build(&document(vec![boxed]), &assets(), Options::default()).expect("build");
+
+        assert!(
+            built
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("text-overflow")),
+            "{:?}",
+            built.diagnostics
+        );
+    }
+
+    #[test]
+    fn text_too_wide_for_the_page_says_so_in_the_flow_as_well() {
+        // The other of the two text paths. One knowing something the other
+        // does not is the shape of most of the defects found in this file.
+        let narrow = ir::Document {
+            page: ir::PageSetup {
+                width: Pt(160.0),
+                height: Pt(400.0),
+                ..Default::default()
+            },
+            header: None,
+            footer: None,
+            accumulators: Vec::new(),
+            children: vec![paragraph(UNBREAKABLE)],
+        };
+
+        let built = build(&narrow, &assets(), Options::default()).expect("build");
+
+        assert!(
+            built
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("text-overflow")),
+            "{:?}",
+            built.diagnostics
+        );
+    }
+
+    #[test]
+    fn text_that_fits_says_nothing() {
+        // The guard that keeps the rule honest: a warning on every paragraph
+        // would be read once and ignored for ever after.
+        let built = build(
+            &document(vec![paragraph("una linea corriente que cabe de sobra")]),
+            &assets(),
+            Options::default(),
+        )
+        .expect("build");
+
+        assert!(built.diagnostics.is_empty(), "{:?}", built.diagnostics);
+    }
+
+    #[test]
+    fn every_row_of_a_multi_row_header_comes_back_on_a_continuation_page() {
+        // A grouped report — a ledger, a journal — wants two rows at the top
+        // of its table: which group this is, and what its columns mean. Both
+        // have to come back when the group runs over the page, and a table
+        // could only repeat one, so an author had to choose which half of that
+        // question a reader on page 40 got answered.
+        let rows: Vec<ir::Row> = (0..300)
+            .map(|i| ir::Row {
+                cells: vec![ir::Cell::new(format!("apunte {i}"))],
+                ..Default::default()
+            })
+            .collect();
+
+        let table = |header: Vec<ir::Row>| {
+            ir::Node::Table(ir::Table {
+                columns: vec![ir::ColumnSpec::default()],
+                header,
+                rows: rows.clone(),
+                repeat_header: true,
+                padding: Edges::all(Pt(2.0)),
+                space_after: Pt(0.0),
+            })
+        };
+        let row = |text: &str| ir::Row {
+            cells: vec![ir::Cell::new(text)],
+            ..Default::default()
+        };
+
+        // Uncompressed, so the drawing operators can be counted. The words
+        // themselves are not in the file to look for — text is written as
+        // glyph ids.
+        let plain = Options { compress: false };
+        let one = build(
+            &document(vec![table(vec![row("600000 COMPRAS")])]),
+            &assets(),
+            plain,
+        )
+        .expect("build");
+        let two = build(
+            &document(vec![table(vec![row("600000 COMPRAS"), row("FECHA")])]),
+            &assets(),
+            plain,
+        )
+        .expect("build");
+
+        let runs = |pdf: &[u8]| {
+            let text = String::from_utf8_lossy(pdf);
+            text.matches("Tj").count() + text.matches("TJ").count()
+        };
+
+        assert!(
+            one.pages > 1,
+            "the table has to span pages to mean anything"
+        );
+        assert_eq!(
+            runs(&two.pdf) - runs(&one.pdf),
+            two.pages,
+            "the second header row did not come back on every page"
         );
     }
 }

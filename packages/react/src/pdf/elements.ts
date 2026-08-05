@@ -152,8 +152,15 @@ export interface RowProps {
 
 export interface TableProps {
   columns: ColumnProps[];
-  /** Comes back at the top of every continuation page unless turned off. */
-  header?: RowProps;
+  /**
+   * Comes back at the top of every continuation page unless turned off.
+   *
+   * Several rows when the table needs them: a grouped report wants to say
+   * which group this is *and* what its columns mean, and a reader on the
+   * fortieth page of a group should not have to choose which half of that
+   * question gets answered. They are painted as one block.
+   */
+  header?: RowProps | RowProps[];
   rows: RowProps[];
   repeatHeader?: boolean;
   padding?: number | Edges;

@@ -151,7 +151,15 @@ function block(node: HostNode, theme: Theme): IrNode {
       return irNode({
         t: 'table',
         columns: (props.columns as Record<string, unknown>[]).map(column),
-        header: props.header === undefined ? undefined : tableRow(props.header, theme),
+        // Always a list, however the author wrote it: the engine reads one
+        // shape rather than two, and the shorthand stays for the common case
+        // of a single row.
+        header:
+          props.header === undefined
+            ? undefined
+            : (Array.isArray(props.header) ? props.header : [props.header]).map((one) =>
+                tableRow(one, theme),
+              ),
         rows: (props.rows as Record<string, unknown>[]).map((one) => tableRow(one, theme)),
         repeatHeader: props.repeatHeader,
         padding: edges(props.padding),

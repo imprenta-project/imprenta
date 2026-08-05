@@ -11,10 +11,15 @@ const font = (name: string) => readFileSync(join(fixtures, 'fonts', name));
 
 const roman = { fonts: [{ weight: 'regular', data: font('Roboto-Regular.ttf') }] };
 const page = { width: 595, height: 842 };
+// Written as the shorthand a caller reaches for — one repeated row — so the
+// normalisation in `openTable` is exercised rather than side-stepped.
 const head = {
   columns: [{ width: { unit: 'pt', value: 80 } }, {}],
   header: { cells: [{ text: 'Ref.' }, { text: 'Concepto' }] },
 };
+
+/** The same head as the IR holds it: the repeated rows are a list. */
+const headAsIr = { ...head, header: [head.header] };
 
 const rows = (from: number, to: number) =>
   Array.from({ length: to - from }, (_, i) => ({
@@ -23,7 +28,7 @@ const rows = (from: number, to: number) =>
 
 /** The same ledger as one declared document, for comparison. */
 const declared = (count: number) =>
-  JSON.stringify({ page, children: [{ t: 'table', ...head, rows: rows(0, count) }] });
+  JSON.stringify({ page, children: [{ t: 'table', ...headAsIr, rows: rows(0, count) }] });
 
 const scratch = (name: string) => {
   const path = join(tmpdir(), `imprenta-stream-${name}-${process.pid}.pdf`);

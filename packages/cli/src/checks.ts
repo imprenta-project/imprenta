@@ -228,10 +228,14 @@ function table(
   context: Context,
 ): void {
   const columns = ((it.columns ?? []) as unknown[]).length;
-  const header = it.header as { cells?: unknown[]; style?: Style } | undefined;
+  // The repeated header is a list of rows: a grouped report puts the group on
+  // one and the column labels on the next. Every one of them is a row like any
+  // other and gets checked like one — a header short of a cell is exactly as
+  // wrong as a body row short of one, and rather more visible.
+  const header = (it.header ?? []) as { cells?: unknown[]; style?: Style }[];
   const rows = (it.rows ?? []) as { cells?: unknown[]; style?: Style }[];
 
-  for (const row of header ? [header, ...rows] : rows) {
+  for (const row of [...header, ...rows]) {
     const cells = (row.cells ?? []) as {
       text?: string;
       size?: number;

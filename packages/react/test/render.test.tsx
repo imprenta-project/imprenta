@@ -246,6 +246,31 @@ describe('alignment', () => {
 });
 
 describe('tables and lists', () => {
+  it('takes one header row or several, and always sends the engine a list', async () => {
+    // A grouped report wants two rows at the top of its table — which group
+    // this is, and what its columns mean — and both have to come back when
+    // the group runs over the page. One row stays the common case and keeps
+    // its shorthand; the IR only ever sees a list, so the engine has one
+    // shape to read rather than two.
+    const cells = [{ text: 'Ref.' }];
+    const document = await toDocument(
+      <Document>
+        <Table columns={[{ width: 'auto' }]} header={{ cells }} rows={[]} />
+        <Table
+          columns={[{ width: 'auto' }]}
+          header={[{ cells }, { cells: [{ text: 'FECHA' }] }]}
+          rows={[]}
+        />
+      </Document>,
+    );
+
+    const headerOf = (at: number) =>
+      (document.children[at] as unknown as { header: unknown[] }).header;
+
+    expect(headerOf(0)).toEqual([{ cells }]);
+    expect(headerOf(1)).toEqual([{ cells }, { cells: [{ text: 'FECHA' }] }]);
+  });
+
   it('resolves a row style exactly as it resolves a box style', async () => {
     // `RowProps.style` is typed as a box's props and an author is entitled to
     // read that literally: the three words that draw a hairline under a box
@@ -277,12 +302,12 @@ describe('tables and lists', () => {
 
     const box = document.children[0] as unknown as { style: unknown };
     const table = document.children[1] as unknown as {
-      header: { style: unknown };
+      header: { style: unknown }[];
       rows: { style: unknown }[];
     };
 
     expect(table.rows[0].style).toEqual(box.style);
-    expect(table.header.style).toEqual(box.style);
+    expect(table.header[0].style).toEqual(box.style);
   });
 
   it('passes a table through as the engine declares it', async () => {
@@ -304,7 +329,7 @@ describe('tables and lists', () => {
         { width: { unit: 'auto' } },
         { width: { unit: 'pt', value: 80 }, align: 'end' },
       ],
-      header: { cells: [{ text: 'Ref.' }, { text: 'Concepto' }, { text: 'Importe' }] },
+      header: [{ cells: [{ text: 'Ref.' }, { text: 'Concepto' }, { text: 'Importe' }] }],
       rows: [{ cells: [{ text: '001' }, { text: 'Licencia' }, { text: '1.200,00 €' }] }],
       padding: { top: 4, right: 4, bottom: 4, left: 4 },
     });

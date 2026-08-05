@@ -287,10 +287,10 @@ mod tests {
                 },
                 ir::ColumnSpec::default(),
             ],
-            header: Some(ir::Row {
+            header: vec![ir::Row {
                 cells: vec![ir::Cell::new("Ref."), ir::Cell::new("Concepto")],
                 ..Default::default()
-            }),
+            }],
             repeat_header: true,
             padding: Default::default(),
             space_after: Pt(0.0),

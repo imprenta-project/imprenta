@@ -377,13 +377,21 @@ pub struct Border {
     pub color: Color,
 }
 
-/// A table: columns, an optional repeating header, and rows.
+/// A table: columns, the rows it repeats at the top of each page, and rows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default = "Table::empty")]
 pub struct Table {
     pub columns: Vec<ColumnSpec>,
+    /// Repeated at the top of every continuation page, in order.
+    ///
+    /// Several because a grouped report wants two: which group this is, and
+    /// what its columns mean. Both have to come back when the group runs over
+    /// the page, and a reader on page 40 should not have to choose which half
+    /// of that question gets answered. They are painted as one block — a
+    /// repeated prefix is one atom whether it holds one row or three, which is
+    /// why nothing below this learns about the difference.
     #[serde(default)]
-    pub header: Option<Row>,
+    pub header: Vec<Row>,
     pub rows: Vec<Row>,
     /// Whether the header comes back at the top of each continuation page.
     ///
@@ -405,8 +413,10 @@ pub struct Table {
 #[serde(rename_all = "camelCase")]
 pub struct TableHead {
     pub columns: Vec<ColumnSpec>,
+    /// Repeated at the top of every continuation page, in order. See
+    /// [`Table::header`].
     #[serde(default)]
-    pub header: Option<Row>,
+    pub header: Vec<Row>,
     #[serde(default = "yes")]
     pub repeat_header: bool,
     #[serde(default)]
@@ -438,7 +448,7 @@ impl Table {
     pub fn empty() -> Self {
         Self {
             columns: Vec::new(),
-            header: None,
+            header: Vec::new(),
             rows: Vec::new(),
             repeat_header: true,
             padding: Edges::default(),
@@ -746,10 +756,10 @@ mod tests {
                 align: Align::End,
                 overflow: Overflow::Ellipsis,
             }],
-            header: Some(Row {
+            header: vec![Row {
                 cells: vec![Cell::new("Importe")],
                 ..Default::default()
-            }),
+            }],
             rows: vec![Row {
                 cells: vec![Cell::new("1.234,56")],
                 totals: vec![TotalContribution {

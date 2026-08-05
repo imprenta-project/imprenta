@@ -209,7 +209,7 @@ fn stream(rows: usize) {
     session
         .feed(&Chunk::OpenTable(ir::TableHead {
             columns: vec![ir::ColumnSpec::default(), ir::ColumnSpec::default()],
-            header: None,
+            header: Vec::new(),
             repeat_header: true,
             padding: Default::default(),
             space_after: Pt(0.0),

@@ -87,7 +87,17 @@ export class Printer {
 
   /** Begins a table. Its rows follow, in as many batches as suits you. */
   openTable(head: unknown): Promise<void> {
-    return this.feed({ op: 'openTable', json: JSON.stringify(head) });
+    // A table repeats a *list* of rows at the top of each page, and a table
+    // that repeats one is the common case. Normalised here so the streaming
+    // API is no stricter than the declarative one: an author who wrote a
+    // single row should not have to find out from a deserialiser that the
+    // engine wanted a sequence.
+    const { header, ...rest } = (head ?? {}) as { header?: unknown };
+    const json = JSON.stringify(
+      header === undefined ? head : { ...rest, header: Array.isArray(header) ? header : [header] },
+    );
+
+    return this.feed({ op: 'openTable', json });
   }
 
   /**
