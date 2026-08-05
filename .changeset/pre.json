@@ -9,6 +9,7 @@
     "@imprentajs/xlsx": "0.0.0"
   },
   "changesets": [
+    "aligned-paragraphs",
     "great-pugs-shave",
     "olive-hounds-repeat",
     "quiet-moons-repeat",
