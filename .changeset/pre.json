@@ -10,10 +10,18 @@
   },
   "changesets": [
     "aligned-paragraphs",
+    "bands-on-every-released-page",
+    "give-the-memory-back",
     "great-pugs-shave",
+    "measure-a-cell-once",
+    "multi-row-table-headers",
     "olive-hounds-repeat",
+    "our-own-pdf-writer",
+    "page-count-without-holding-the-document",
     "quiet-moons-repeat",
     "table-rows-styled",
-    "tidy-rows-stand"
+    "text-that-overflows",
+    "tidy-rows-stand",
+    "tounicode-across-a-style-change"
   ]
 }
