@@ -1,6 +1,6 @@
 {
   "name": "@imprentajs/pdf",
-  "version": "0.1.0-alpha.4",
+  "version": "0.1.0-alpha.5",
   "description": "Imprenta's PDF engine: measure, paginate, paint. One WebAssembly module, every runtime.",
   "license": "Apache-2.0",
   "repository": {

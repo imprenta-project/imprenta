@@ -1,5 +1,211 @@
 # @imprentajs/pdf
 
+## 0.1.0-alpha.5
+
+### Minor Changes
+
+- [`d8acc38`](https://github.com/imprenta-project/imprenta/commit/d8acc3838a6e4f935f995746e626688319ed9430) Thanks [@AbianS](https://github.com/AbianS)! - An engine that renders one very large document gives the memory back.
+
+  WebAssembly has no instruction to shrink a linear memory, so an instance's
+  footprint is the high-water mark of the largest document it has ever rendered,
+  for as long as it lives — once per engine in the pool. A service that prints
+  one ledger a month and invoices the rest of the time carried that ledger's
+  memory from the day it first arrived.
+
+  A worker now takes a fresh instance once a document leaves one swollen. The
+  compiled module is reused, so the warm-up is not paid again, and it happens
+  after the reply rather than before it, so nobody waits for it.
+
+  ```ts
+  await render(ir, { fonts, recycleAbove: 64 * 1024 * 1024 }); // the default
+  await render(ir, { fonts, recycleAbove: Infinity }); // never recycle
+  ```
+
+  Measured: 21.1 MB held after a 423-page ledger, 2.6 MB with it.
+
+- [`533da7a`](https://github.com/imprenta-project/imprenta/commit/533da7a3b60f133b73d97da12f3d2f76f6054158) Thanks [@AbianS](https://github.com/AbianS)! - A table can repeat several rows at the top of each page, not just one.
+
+  ```tsx
+  <Table
+    header={[
+      {
+        style: { background: "#11307D" },
+        cells: [{ text: "600000" }, { text: "Compras" }],
+      },
+      { cells: [{ text: "FECHA" }, { text: "DESCRIPCIÓN" }, { text: "DEBE" }] },
+    ]}
+    rows={apuntes}
+  />
+  ```
+
+  A grouped report — a ledger, a journal, a balance by period — wants to say two
+  things at the top of its table: which group this is, and what its columns mean.
+  Both have to come back when the group runs over the page, and with one row an
+  author had to choose which half of that question a reader on page 40 got
+  answered. A browser has never had this problem: two `<tr>` in a `<thead>` and
+  both repeat.
+
+  Several rows are still **one atom**. A repeated prefix is one indivisible block
+  by definition, so the rows are stacked into a single box before anything is
+  paginated — the packer, the painter and the streaming composer never learn
+  there was a second row, and none of them changed.
+
+  The IR now holds `header` as a list, which is a breaking change to anything
+  writing the IR by hand. `<Table header>` takes one row or an array, and
+  `Printer.openTable` normalises a single row too, so the streaming API is no
+  stricter than the declarative one: an author who wrote one row should not find
+  out from a deserialiser that the engine wanted a sequence.
+
+  The checks read the header as a list too, so every repeated row is checked like
+  the row it is — one short of a cell is exactly as wrong as a body row short of
+  one, and rather more visible.
+
+- [`d8acc38`](https://github.com/imprenta-project/imprenta/commit/d8acc3838a6e4f935f995746e626688319ed9430) Thanks [@AbianS](https://github.com/AbianS)! - The PDF is written by `imprenta-pdf-write` now, which is ours.
+
+  A page is serialised, compressed and forgotten the moment it is finished; what
+  survives it is its bytes in the output and one cross-reference entry. The
+  writer this replaces kept every painted page until the document closed and then
+  walked the whole collection twice into a buffer the size of the file.
+
+  It is built on the same two crates that one was — `pdf-writer` for the object
+  syntax and `subsetter` for the fonts — so subsetting, CID fonts and the
+  `ToUnicode` map are not re-derived. What it drops is everything this engine
+  cannot reach: no transparency groups, no patterns, no shadings, no clip paths,
+  no tagged structure, no encryption.
+
+  What it buys, beyond the memory: the file is **6% smaller**, rendering is
+  faster, and a defect that had every long document failing at around 2 400 pages
+  — a recursion once per page, on a target with no threads — cannot come back
+  with the next upgrade.
+
+  Colours, borders, radii, opacity, images, links and every other way a document
+  can look are unchanged, and the engine's whole test suite passes against it
+  untouched.
+
+- [`d8acc38`](https://github.com/imprenta-project/imprenta/commit/d8acc3838a6e4f935f995746e626688319ed9430) Thanks [@AbianS](https://github.com/AbianS)! - `{{pages}}` no longer costs the whole document.
+
+  Nothing can know how many pages there are until the last one is packed, so a
+  footer saying "de 4 849" used to be bought by holding every painted page in
+  memory until then. Measured on a five-column ledger that was **twenty-three
+  times** the memory of the same document without it, and it was the largest
+  single reason a long one ran out.
+
+  It is now bought by walking the document twice: once to count the pages,
+  painting none of them, and once to paint them knowing the answer. The counting
+  pass goes through the same measurer and the same packer a real render does —
+  a cheaper estimate would be a second paginator, and the two would disagree on
+  exactly the documents that print their own length. The file is byte for byte
+  what holding produced.
+
+  A fed document has no second walk of its own, since its rows are gone once they
+  have been read, so a `Printer` printing `{{pages}}` keeps the _pieces it was
+  given_ instead of the pages it painted. A row weighs a few hundred bytes where
+  the page it lands on weighs six kilobytes, and it costs the caller nothing.
+
+  Measured through the WebAssembly module, streaming a ledger with `{{pages}}`:
+
+  |  pages |           before |        after |
+  | -----: | ---------------: | -----------: |
+  |    668 |          64.8 MB |  **22.6 MB** |
+  |  2 670 |         244.1 MB |  **49.0 MB** |
+  | 10 680 | would not finish | **148.3 MB** |
+
+### Patch Changes
+
+- [`d8acc38`](https://github.com/imprenta-project/imprenta/commit/d8acc3838a6e4f935f995746e626688319ed9430) Thanks [@AbianS](https://github.com/AbianS)! - Fix: a header or footer went missing from every page but the last few.
+
+  A document is painted and dropped as it goes, every few hundred atoms, and
+  those pages were released through a code path that built no bands at all. So a
+  declared ledger of 1 200 rows came out with a footer on **one page of
+  eighteen**, and a header on none. Streamed and sharded documents had it too.
+
+  Every test written around the feature used a document short enough never to
+  reach the first flush, which is why it survived: at 200 rows everything is
+  painted at the end and everything is correct.
+
+  `Walk` now carries what a band is built from and flushes with it, so a page
+  released half-way through a document gets the same header and footer as one
+  painted at the end. There are four tests, and each of them counts: a footer on
+  every page is exactly one more text run per page than the same document without
+  one.
+
+- [`d8acc38`](https://github.com/imprenta-project/imprenta/commit/d8acc3838a6e4f935f995746e626688319ed9430) Thanks [@AbianS](https://github.com/AbianS)! - Rendering is 25–45% faster, because every cell was being laid out twice.
+
+  Measuring a table cell shaped its text, and then the check for characters the
+  font cannot draw shaped it all over again — a second full trip through the
+  layout engine for every cell in the document, which on a ledger was **half of
+  all the time spent measuring**. The lines that measuring produces already hold
+  the answer: a glyph that came back as `.notdef` is a character the face could
+  not draw, and it carries the byte range it came from.
+
+  The same for a paragraph, which was shaped once to be checked and once to be
+  broken into lines.
+
+  A worker also gets its own shaper only where there is a second core to give it
+  to. Building one parses every font file the document declares, and inside a
+  WebAssembly module — where there are no threads at all — that was paid per
+  batch of rows, throwing away the shaping cache each time, in exchange for
+  nothing.
+
+  Measured through the module, streaming the same ledger:
+
+  |  pages |   before |        after |
+  | -----: | -------: | -----------: |
+  |    668 |   602 ms |   **388 ms** |
+  |  2 670 | 2 274 ms | **1 307 ms** |
+  | 10 680 | 8 863 ms | **4 994 ms** |
+
+  `Shaper::layouts()` counts trips through the layout engine, so a test can hold
+  the line. No assertion about a height could see this one.
+
+- [`533da7a`](https://github.com/imprenta-project/imprenta/commit/533da7a3b60f133b73d97da12f3d2f76f6054158) Thanks [@AbianS](https://github.com/AbianS)! - Text too wide for its box is now reported, instead of being painted over the
+  edge in silence.
+
+  It happens when nothing in the line can be broken — a URL, a reference code, an
+  IBAN written without spaces. The engine breaks what it can, runs out of places
+  to break, and paints the rest past the edge. Nothing said so, which made it the
+  worst kind of defect this project has: the page looks deliberate, every test is
+  green, and a line of it is over the side. It went unnoticed here through an
+  entire invoice design until somebody happened to look at the file.
+
+  ```
+  text-overflow — "ref=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" is 268pt wide
+                   where 112pt were available, so it is painted outside its box
+  ```
+
+  The engine is the only place this can be caught. The checks in the CLI read the
+  IR and have no fonts, so `wider-than-the-page` can tell that a _declared_ width
+  is too big and never that a _measured_ line is.
+
+  A table cell has had this all along, as `cell-overflow`. The two are the same
+  idea in the two places text is measured, and the names are a pair on purpose —
+  what was missing was the paragraph, which is most of a document.
+
+  One report per paragraph, naming its widest line and quoting the first forty
+  characters, because a warning per line of a long paragraph is a warning nobody
+  reads. It is a warning rather than an error: the document is still usable, and
+  the author may have judged that a millimetre over a box edge does not matter.
+
+  This says what happened; it does not fix it. Breaking inside a word that has
+  nowhere else to break — CSS's `overflow-wrap: anywhere` — is a separate
+  decision and not one to make on an author's behalf.
+
+- [`d8acc38`](https://github.com/imprenta-project/imprenta/commit/d8acc3838a6e4f935f995746e626688319ed9430) Thanks [@AbianS](https://github.com/AbianS)! - Fix: text that changed colour mid-line could not be copied out of the PDF.
+
+  Every glyph carries the range of source text it stands for, and that range is
+  what becomes the document's `ToUnicode` map — the thing that lets a reader
+  select, copy, search or read the page aloud. On a line that changed style
+  without changing font, the second stretch was handed the ranges belonging to
+  the first: `Total 1.234,00` in two colours extracted as `Total Total 1.`.
+
+  Nothing on the page moved, which is what makes it worth writing down. The
+  document looked perfect in every viewer and every screenshot; only the text
+  underneath was wrong.
+
+  A bold stretch was never affected — a different weight is a different font, so
+  the shaper starts a new run and the walk restarted correctly by accident. It
+  took two stretches of the _same_ face in different ink to show it.
+
 ## 0.1.0-alpha.4
 
 ### Minor Changes
