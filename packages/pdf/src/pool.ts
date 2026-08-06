@@ -47,6 +47,16 @@ export interface PoolOptions {
   size?: number;
   /** Throwaway renders per worker at boot. Defaults to 1; 0 to skip. */
   warmups?: number;
+  /**
+   * Linear memory, in bytes, above which a worker takes a fresh instance once
+   * the document that grew it is finished. Defaults to 64 MB; `Infinity`
+   * never recycles.
+   *
+   * See {@link BootData.recycleAbove}: WebAssembly memory only ever grows, so
+   * without this a pool keeps the high-water mark of the largest document it
+   * has ever rendered, times its size, for as long as the process lives.
+   */
+  recycleAbove?: number;
   /** The module's bytes. Defaults to the one shipped with the package. */
   wasm?: ArrayBufferLike | ArrayBufferView;
 }
@@ -63,6 +73,17 @@ interface Pending {
  * the cap — cores are cheap to ask for and memory is not.
  */
 const DEFAULT_CAP = 8;
+
+/**
+ * When a worker's instance is worth replacing, in bytes.
+ *
+ * Sixty-four megabytes is well above what any invoice, report or short ledger
+ * reaches, and well below what a document big enough to be worth a fresh
+ * instance leaves behind. The cost of being wrong either way is small: too
+ * low and a service pays a few milliseconds it did not need; too high and it
+ * carries memory it is not using.
+ */
+const DEFAULT_RECYCLE_ABOVE = 64 * 1024 * 1024;
 
 export class Pool {
   private readonly free: Worker[] = [];
@@ -99,6 +120,7 @@ export class Pool {
             })),
             images: (options.images ?? []).map((i) => ({ name: i.name, data: copyOf(i.data) })),
             warmups,
+            recycleAbove: options.recycleAbove ?? DEFAULT_RECYCLE_ABOVE,
           },
         });
         pool.all.push(worker);

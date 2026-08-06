@@ -2,11 +2,10 @@
 //!
 //! # Why there is no thread in here
 //!
-//! The Node binding gives its [`Session`] a dedicated OS thread, feeds it down
-//! a channel, and refuses a second call while one is in flight. All of that
-//! exists for one reason: `Session` is not `Send`, because krilla keeps its
-//! fonts behind an `Rc`, so a half-written document cannot move between
-//! threads at all.
+//! The Node binding gave its [`Session`] a dedicated OS thread, fed it down a
+//! channel, and refused a second call while one was in flight. All of that
+//! existed for one reason: a half-written document holds parley's contexts
+//! and cannot move between threads at all.
 //!
 //! A WebAssembly instance is a single-threaded world by construction, so the
 //! session simply lives here between calls. No thread, no channel, no busy
@@ -148,9 +147,15 @@ impl Printer {
         })
     }
 
+    /// Hands the piece over rather than lending it.
+    ///
+    /// It was parsed here and nothing else will look at it, so there is no
+    /// reason to make the session copy it — and a document printing
+    /// `{{pages}}` keeps every piece it is fed, which is precisely where a
+    /// copy of every row would be the most expensive thing in the module.
     fn feed(&mut self, chunk: Chunk) -> Result<(), JobError> {
         self.session
-            .feed(&chunk)
+            .feed_owned(chunk)
             .map_err(|e| JobError::Build(e.to_string()))
     }
 }

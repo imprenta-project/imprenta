@@ -4,9 +4,10 @@
 //! is independent of every other, so it parallelises. Packing does not: it is
 //! the one pass that walks the document in order, and that ordering is what
 //! makes running totals and page-boundary decisions possible. Painting does
-//! not either, because krilla's `Document::start_page` borrows the document
-//! for the lifetime of the page; that one is a limitation of the writer
-//! rather than of the design, and is worth revisiting upstream.
+//! not either: a page is written into the file as it closes, and two workers
+//! writing into one file at once would have to agree on where each of them
+//! started. That is a real limitation and a deliberate one — see
+//! `imprenta-pdf-write`, where not holding a finished page is the point.
 //!
 //! Each worker gets its own [`Shaper`], and therefore its own cache. Sharing
 //! one behind a lock would serialise the very thing being parallelised, and a
@@ -59,7 +60,7 @@ pub fn measure_all(font: &[u8], blocks: &[Block<'_>]) -> Vec<Measured> {
 pub fn measure_all_in(faces: &Faces, blocks: &[Block<'_>]) -> Vec<Measured> {
     let build = || Shaper::with_faces(faces.iter().cloned());
 
-    if blocks.len() < PARALLEL_THRESHOLD {
+    if blocks.len() < PARALLEL_THRESHOLD || !worth_splitting() {
         let mut shaper = build();
         return blocks
             .iter()
@@ -81,6 +82,22 @@ pub fn measure_all_in(faces: &Faces, blocks: &[Block<'_>]) -> Vec<Measured> {
 
 /// Below this, building a `Shaper` per worker costs more than it saves.
 const PARALLEL_THRESHOLD: usize = 256;
+
+/// Whether spreading the work is worth splitting the shaper for.
+///
+/// A worker needs its own [`Shaper`] — parley's contexts are not shareable —
+/// and building one parses every font file the document declares. That is a
+/// fair price for a core, and no price at all is worth paying for none.
+///
+/// It matters most where the engine actually runs longest: a WebAssembly
+/// module has no threads, so rayon runs every chunk on the calling one, and
+/// the split bought nothing while costing a font parse per chunk *and* the
+/// shaping cache, which is thrown away with each worker's shaper. Asked at
+/// run time rather than by `cfg`, because a single-core container is the same
+/// situation and deserves the same answer.
+pub(crate) fn worth_splitting() -> bool {
+    rayon::current_num_threads() > 1
+}
 
 /// Chunks large enough that each worker's cache warms up, and numerous enough
 /// that rayon can still balance the load.

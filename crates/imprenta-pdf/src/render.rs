@@ -4,15 +4,22 @@
 //! prototype painting was 82% of the run time and 40% of *that* was Flate
 //! compression, both of which are embarrassingly parallel. Nothing does that
 //! yet — no benchmark asks for it.
+//!
+//! The bytes are written by [`imprenta_pdf_write`], which is ours. What that
+//! buys is stated where it lives and is worth repeating here: a page is
+//! serialised, compressed and dropped the moment it is finished, so what
+//! survives it is its bytes in the output and one offset. The writer this
+//! replaced kept every painted page until the document closed.
 
 use crate::content::{CanvasContent, Content, ImageContent, ImageFormat, LinkTarget, PathOp};
 use crate::decoration::{Decoration, fitted_radius};
 use crate::pack::Page;
 use crate::shape::Face;
 use crate::shape::Line;
-use imprenta_core::color::Color;
 use imprenta_core::units::{Edges, Pt};
+use imprenta_pdf_write::{FaceId, PageWriter, Region, Settings, Writer};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// The page box and its margins.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -88,6 +95,15 @@ pub enum RenderError {
     Serialise(String),
 }
 
+impl From<imprenta_pdf_write::WriteError> for RenderError {
+    fn from(error: imprenta_pdf_write::WriteError) -> Self {
+        match error {
+            imprenta_pdf_write::WriteError::UnreadableFont => RenderError::UnreadableFont,
+            other => RenderError::Serialise(other.to_string()),
+        }
+    }
+}
+
 /// Paints packed pages to a PDF.
 ///
 /// `lines[i]` is what [`crate::pack::Placement::atom`] `i` refers to — the
@@ -130,13 +146,10 @@ pub fn render_with(
             "a PDF must have at least one page".into(),
         ));
     }
-
-    let krilla_font = krilla::text::Font::new(krilla::Data::from(font.to_vec()), 0)
-        .ok_or(RenderError::UnreadableFont)?;
     render_inner(
         pages,
         contents,
-        &Fonts::single(krilla_font),
+        &Fonts::single(font.to_vec()),
         geometry,
         options,
     )
@@ -150,6 +163,7 @@ fn render_inner(
     options: Options,
 ) -> Result<Vec<u8>, RenderError> {
     let mut sink = PageSink::new(geometry, options)?;
+    sink.register(fonts)?;
     for page in pages {
         sink.paint_page(page, contents, fonts, 0);
     }
@@ -160,32 +174,53 @@ fn render_inner(
 ///
 /// Exists so a caller can hand pages over as they are finished and drop the
 /// content behind them, rather than assembling the whole document first —
-/// see [`crate::compose`]. krilla still keeps each painted page until the
-/// end, but that is 15.5 KB apiece against the 405 KB of atoms and shaped
-/// lines a caller would otherwise be holding.
+/// see [`crate::compose`]. Since the writer became ours the two halves agree:
+/// a page released here is a page written, and neither side is holding it.
 pub struct PageSink {
-    doc: krilla::Document,
-    settings: krilla::page::PageSettings,
+    writer: Writer,
     geometry: Geometry,
-    images: ImageCache,
+    /// The faces the writer knows about, by the face a stretch names.
+    /// Registered once, at the top, because a face registered twice is a
+    /// second subset of the same typeface embedded in the same file.
+    faces: HashMap<Face, FaceId>,
+    fallback: Option<FaceId>,
     pages: usize,
 }
 
 impl PageSink {
     pub fn new(geometry: Geometry, options: Options) -> Result<Self, RenderError> {
-        let settings =
-            krilla::page::PageSettings::from_wh(geometry.width.get(), geometry.height.get())
-                .ok_or_else(|| RenderError::Serialise("page size must be positive".into()))?;
+        if geometry.width.get() <= 0.0 || geometry.height.get() <= 0.0 {
+            return Err(RenderError::Serialise("page size must be positive".into()));
+        }
         Ok(Self {
-            doc: krilla::Document::new_with(krilla::SerializeSettings {
-                compress_content_streams: options.compress,
-                ..Default::default()
+            writer: Writer::new(Settings {
+                compress: options.compress,
             }),
-            settings,
             geometry,
-            images: HashMap::new(),
+            faces: HashMap::new(),
+            fallback: None,
             pages: 0,
         })
+    }
+
+    /// Registers `fonts` with the writer.
+    ///
+    /// Called when the composer is built rather than when the first page is
+    /// painted, because this is where a font that cannot be read is found —
+    /// and finding that out forty seconds into a ledger, from a painter that
+    /// has nowhere to report it, is finding it out too late.
+    pub(crate) fn register(&mut self, fonts: &Fonts) -> Result<(), RenderError> {
+        if self.fallback.is_some() {
+            return Ok(());
+        }
+        for (face, bytes) in &fonts.faces {
+            let id = self.writer.add_face(bytes.to_vec())?;
+            self.faces.insert(*face, id);
+            if *face == Face::REGULAR || self.fallback.is_none() {
+                self.fallback = Some(id);
+            }
+        }
+        Ok(())
     }
 
     /// Paints one page, resolving each placement through `lookup`.
@@ -200,34 +235,39 @@ impl PageSink {
         lookup: impl Fn(usize) -> Option<&'c Content>,
         bands: &crate::compose::Painted,
     ) {
+        // Registered when the sink was built, and again here only for the
+        // callers that paint straight into one. Unreadable bytes were
+        // refused there, so there is nothing left to report.
+        if self.register(fonts).is_err() {
+            return;
+        }
         let geometry = self.geometry;
         let available = geometry.width - geometry.margin.horizontal();
-        let mut pdf_page = self.doc.start_page_with(self.settings.clone());
-        let mut links: Vec<LinkRect> = Vec::new();
-        let mut surface = pdf_page.surface();
+        let faces = &self.faces;
+        let fallback = self.fallback;
+        let mut writer = self
+            .writer
+            .page(geometry.width.get(), geometry.height.get());
 
-        let mut draw =
-            |content: &Content, top: Pt, images: &mut ImageCache, links: &mut Vec<LinkRect>| {
-                paint(
-                    &mut surface,
-                    content,
-                    fonts,
-                    images,
-                    links,
-                    geometry.margin.left,
-                    top,
-                    available,
-                );
-            };
+        let draw = |content: &Content, top: Pt, writer: &mut PageWriter<'_>| {
+            paint(
+                writer,
+                content,
+                &Painter { faces, fallback },
+                geometry.margin.left,
+                top,
+                available,
+            );
+        };
 
         // The bands, in the room the geometry set aside for them. A header
         // sits against the top margin and a footer against the bottom, so
         // neither can drift as a page fills or empties.
         if let Some(header) = &bands.header {
-            draw(header, geometry.margin.top, &mut self.images, &mut links);
+            draw(header, geometry.margin.top, &mut writer);
         }
         if let Some(footer) = &bands.footer {
-            draw(footer, geometry.footer_top(), &mut self.images, &mut links);
+            draw(footer, geometry.footer_top(), &mut writer);
         }
 
         // Repeated prefixes first: a table's header sits above the rows that
@@ -237,25 +277,17 @@ impl PageSink {
                 draw(
                     content,
                     geometry.content_top() + continuation.y,
-                    &mut self.images,
-                    &mut links,
+                    &mut writer,
                 );
             }
         }
         for placement in &page.placements {
             if let Some(content) = lookup(placement.atom) {
-                draw(
-                    content,
-                    geometry.content_top() + placement.y,
-                    &mut self.images,
-                    &mut links,
-                );
+                draw(content, geometry.content_top() + placement.y, &mut writer);
             }
         }
 
-        surface.finish();
-        attach_links(&mut pdf_page, links);
-        pdf_page.finish();
+        writer.finish();
         self.pages += 1;
     }
 
@@ -279,86 +311,60 @@ impl PageSink {
                 "a PDF must have at least one page".into(),
             ));
         }
-        self.doc
-            .finish()
-            .map_err(|e| RenderError::Serialise(format!("{e:?}")))
+        Ok(self.writer.finish()?)
     }
 }
-
-fn attach_links(page: &mut krilla::page::Page, links: Vec<LinkRect>) {
-    for link in links {
-        let LinkTarget::Url(url) = &link.target;
-        if let Some(rect) = krilla::geom::Rect::from_xywh(
-            link.x.get(),
-            link.y.get(),
-            link.width.get(),
-            link.height.get(),
-        ) {
-            page.add_annotation(
-                krilla::annotation::LinkAnnotation::new(
-                    rect,
-                    krilla::annotation::Target::Action(
-                        krilla::action::LinkAction::new(url.clone()).into(),
-                    ),
-                )
-                .into(),
-            );
-        }
-    }
-}
-
-/// Decoded images, keyed on the address of the shared buffer they came from.
-type ImageCache = HashMap<*const u8, Option<krilla::image::Image>>;
 
 /// The faces available to the painter, by the face a stretch names.
 ///
 /// A stretch of a line records which face it was shaped against; drawing bold
 /// glyph ids with the regular outlines would produce the wrong letters, not
 /// merely lighter ones.
+///
+/// The bytes and not a parsed font: a face belongs to the document it is
+/// embedded in, and one `Fonts` is shared by every composer a sharded render
+/// spreads across.
 #[derive(Clone)]
 pub struct Fonts {
-    faces: HashMap<Face, krilla::text::Font>,
-    fallback: krilla::text::Font,
+    faces: Vec<(Face, Arc<[u8]>)>,
 }
 
 impl Fonts {
-    fn single(font: krilla::text::Font) -> Self {
+    fn single(font: Vec<u8>) -> Self {
         Self {
-            faces: HashMap::new(),
-            fallback: font,
+            faces: vec![(Face::REGULAR, Arc::from(font))],
         }
     }
 
     /// Loads every face a shaper registered.
+    ///
+    /// The order matters and is the shaper's: a document renders the same
+    /// whichever face was declared first, but the *file* would not, and a
+    /// golden PDF that changed with a hash map's iteration order would be
+    /// worse than no golden PDF at all.
     pub fn from_shaper(shaper: &crate::shape::Shaper) -> Result<Self, RenderError> {
-        let mut faces = HashMap::new();
-        let mut fallback = None;
-        for (face, bytes) in shaper.faces() {
-            let font = krilla::text::Font::new(krilla::Data::from(bytes.to_vec()), 0)
-                .ok_or(RenderError::UnreadableFont)?;
-            if *face == Face::REGULAR || fallback.is_none() {
-                fallback = Some(font.clone());
-            }
-            faces.insert(*face, font);
+        let mut faces: Vec<(Face, Arc<[u8]>)> = shaper
+            .faces()
+            .map(|(face, bytes)| (*face, Arc::clone(bytes)))
+            .collect();
+        if faces.is_empty() {
+            return Err(RenderError::UnreadableFont);
         }
-        Ok(Self {
-            faces,
-            fallback: fallback.ok_or(RenderError::UnreadableFont)?,
-        })
-    }
-
-    fn get(&self, face: Face) -> &krilla::text::Font {
-        self.faces.get(&face).unwrap_or(&self.fallback)
+        faces.sort_by_key(|(face, _)| (face.weight != crate::shape::Weight::Regular, face.italic));
+        Ok(Self { faces })
     }
 }
 
-/// A clickable region gathered while painting, attached to the page after.
-struct LinkRect {
-    target: LinkTarget,
-    x: Pt,
-    y: Pt,
-    width: Pt,
-    height: Pt,
+/// What the painter needs to turn a face into a font.
+struct Painter<'a> {
+    faces: &'a HashMap<Face, FaceId>,
+    fallback: Option<FaceId>,
+}
+
+impl Painter<'_> {
+    fn get(&self, face: Face) -> Option<FaceId> {
+        self.faces.get(&face).copied().or(self.fallback)
+    }
 }
 
 /// Draws `content` with its top-left corner at `(x, y)` on the page.
@@ -366,73 +372,75 @@ struct LinkRect {
 /// Recursive: a box paints its decoration first, then its children over it.
 /// Painting a child before the next sibling's background is exactly what
 /// makes text inside a row survive.
-#[allow(clippy::too_many_arguments)]
 fn paint(
-    surface: &mut krilla::surface::Surface,
+    writer: &mut PageWriter<'_>,
     content: &Content,
-    fonts: &Fonts,
-    images: &mut ImageCache,
-    links: &mut Vec<LinkRect>,
+    painter: &Painter<'_>,
     x: Pt,
     y: Pt,
     available: Pt,
 ) {
     match content {
-        Content::Text(line) => paint_line(surface, line, fonts, x, y),
+        Content::Text(line) => paint_line(writer, line, painter, x, y),
         Content::Box(b) => {
             // A box with no width of its own fills what it is offered. Two
             // panels side by side must each declare one, or both are painted
             // across the whole content box and overlap.
             let width = b.width.unwrap_or(available);
-            paint_box(surface, &b.decoration, x, y, width, b.height());
+            paint_box(writer, &b.decoration, x, y, width, b.height());
 
             let inner = width - b.padding.horizontal();
             for child in &b.children {
                 paint(
-                    surface,
+                    writer,
                     &child.content,
-                    fonts,
-                    images,
-                    links,
+                    painter,
                     x + child.x,
                     y + child.y,
                     inner,
                 );
             }
         }
-        Content::Image(image) => paint_image(surface, image, images, x, y),
-        Content::Canvas(canvas) => paint_canvas(surface, canvas, x, y),
+        Content::Image(image) => paint_image(writer, image, x, y),
+        Content::Canvas(canvas) => paint_canvas(writer, canvas, x, y),
         Content::Link(link) => {
             // The clickable region is an annotation on the page, not part of
-            // the content stream, so it is collected here and attached once
-            // the page is finished.
+            // the content stream, so it is handed over separately.
             let width = link.width.unwrap_or(available);
-            links.push(LinkRect {
-                target: link.target.clone(),
-                x,
-                y,
-                width,
-                height: link.content.height(),
-            });
-            paint(surface, &link.content, fonts, images, links, x, y, width);
+            let LinkTarget::Url(url) = &link.target;
+            writer.link(
+                Region {
+                    x: x.get(),
+                    y: y.get(),
+                    width: width.get(),
+                    height: link.content.height().get(),
+                },
+                url,
+            );
+            paint(writer, &link.content, painter, x, y, width);
         }
         Content::Empty => {}
     }
 }
 
 /// Draws a canvas's path at `(x, y)`.
-fn paint_canvas(surface: &mut krilla::surface::Surface, canvas: &CanvasContent, x: Pt, y: Pt) {
+fn paint_canvas(writer: &mut PageWriter<'_>, canvas: &CanvasContent, x: Pt, y: Pt) {
     if canvas.ops.is_empty() || (canvas.fill.is_none() && canvas.stroke.is_none()) {
         return;
     }
 
     let (ox, oy) = (x.get(), y.get());
-    let mut path = krilla::geom::PathBuilder::new();
-    for op in &canvas.ops {
-        match *op {
-            PathOp::MoveTo(px, py) => path.move_to(ox + px.get(), oy + py.get()),
-            PathOp::LineTo(px, py) => path.line_to(ox + px.get(), oy + py.get()),
-            PathOp::CurveTo(c1x, c1y, c2x, c2y, px, py) => path.cubic_to(
+    let path: Vec<imprenta_pdf_write::PathOp> = canvas
+        .ops
+        .iter()
+        .map(|op| match *op {
+            PathOp::MoveTo(px, py) => {
+                imprenta_pdf_write::PathOp::MoveTo(ox + px.get(), oy + py.get())
+            }
+            PathOp::LineTo(px, py) => {
+                imprenta_pdf_write::PathOp::LineTo(ox + px.get(), oy + py.get())
+            }
+            PathOp::CurveTo(c1x, c1y, c2x, c2y, px, py) => imprenta_pdf_write::PathOp::CurveTo(
                 ox + c1x.get(),
                 oy + c1y.get(),
                 ox + c2x.get(),
@@ -440,20 +448,16 @@ fn paint_canvas(surface: &mut krilla::surface::Surface, canvas: &CanvasContent, 
                 ox + px.get(),
                 oy + py.get(),
             ),
-            PathOp::Close => path.close(),
-        }
-    }
+            PathOp::Close => imprenta_pdf_write::PathOp::Close,
+        })
+        .collect();
 
-    let Some(path) = path.finish() else { return };
-    surface.set_fill(canvas.fill.map(fill));
-    surface.set_stroke(canvas.stroke.map(|(colour, width)| krilla::paint::Stroke {
-        paint: rgb(colour).into(),
-        width: width.get(),
-        ..Default::default()
-    }));
-    surface.draw_path(&path);
-    surface.set_fill(None);
-    surface.set_stroke(None);
+    if let Some(colour) = canvas.fill {
+        writer.fill(&path, colour);
+    }
+    if let Some((colour, width)) = canvas.stroke {
+        writer.stroke(&path, colour, width.get());
+    }
 }
 
 /// How far a cubic control point sits from the corner to draw a quarter
@@ -468,71 +472,84 @@ const KAPPA: f32 = 0.552_284_8;
 ///
 /// One path for both the fill and the stroke, so a background and the border
 /// round it cannot drift apart by a fraction of a point.
+///
+/// Spelled out as lines rather than as a rectangle operator even when it is
+/// one: a `re` and a closed four-line path fill identically, and having one
+/// shape for both cases means a rounded box and a square one are the same
+/// code and cannot diverge.
 fn outline(
     left: f32,
     top: f32,
     right: f32,
     bottom: f32,
     radius: f32,
-) -> Option<krilla::geom::Path> {
-    let mut path = krilla::geom::PathBuilder::new();
+) -> Vec<imprenta_pdf_write::PathOp> {
+    use imprenta_pdf_write::PathOp as Op;
 
     if radius <= 0.0 {
-        path.push_rect(krilla::geom::Rect::from_ltrb(left, top, right, bottom)?);
-        return path.finish();
+        return vec![
+            Op::MoveTo(left, top),
+            Op::LineTo(right, top),
+            Op::LineTo(right, bottom),
+            Op::LineTo(left, bottom),
+            Op::Close,
+        ];
     }
 
     let c = radius * KAPPA;
-    path.move_to(left + radius, top);
-    path.line_to(right - radius, top);
-    path.cubic_to(
-        right - radius + c,
-        top,
-        right,
-        top + radius - c,
-        right,
-        top + radius,
-    );
-    path.line_to(right, bottom - radius);
-    path.cubic_to(
-        right,
-        bottom - radius + c,
-        right - radius + c,
-        bottom,
-        right - radius,
-        bottom,
-    );
-    path.line_to(left + radius, bottom);
-    path.cubic_to(
-        left + radius - c,
-        bottom,
-        left,
-        bottom - radius + c,
-        left,
-        bottom - radius,
-    );
-    path.line_to(left, top + radius);
-    path.cubic_to(
-        left,
-        top + radius - c,
-        left + radius - c,
-        top,
-        left + radius,
-        top,
-    );
-    path.close();
-    path.finish()
+    vec![
+        Op::MoveTo(left + radius, top),
+        Op::LineTo(right - radius, top),
+        Op::CurveTo(
+            right - radius + c,
+            top,
+            right,
+            top + radius - c,
+            right,
+            top + radius,
+        ),
+        Op::LineTo(right, bottom - radius),
+        Op::CurveTo(
+            right,
+            bottom - radius + c,
+            right - radius + c,
+            bottom,
+            right - radius,
+            bottom,
+        ),
+        Op::LineTo(left + radius, bottom),
+        Op::CurveTo(
+            left + radius - c,
+            bottom,
+            left,
+            bottom - radius + c,
+            left,
+            bottom - radius,
+        ),
+        Op::LineTo(left, top + radius),
+        Op::CurveTo(
+            left,
+            top + radius - c,
+            left + radius - c,
+            top,
+            left + radius,
+            top,
+        ),
+        Op::Close,
+    ]
 }
 
 /// Fills and rules the box occupying `(x, y)` to `(x + width, y + height)`.
 fn paint_box(
-    surface: &mut krilla::surface::Surface,
+    writer: &mut PageWriter<'_>,
     decoration: &Decoration,
     x: Pt,
     y: Pt,
     width: Pt,
     height: Pt,
 ) {
+    use imprenta_pdf_write::PathOp as Op;
+
     if decoration.is_empty() {
         return;
     }
@@ -544,12 +561,8 @@ fn paint_box(
 
     let radius = fitted_radius(decoration.radius, width, height).get();
 
-    if let Some(colour) = decoration.background
-        && let Some(path) = outline(left, top, right, bottom, radius)
-    {
-        surface.set_stroke(None);
-        surface.set_fill(Some(fill(colour)));
-        surface.draw_path(&path);
+    if let Some(colour) = decoration.background {
+        writer.fill(&outline(left, top, right, bottom, radius), colour);
     }
 
     // A border that runs all the way round in one width and colour can
@@ -558,17 +571,12 @@ fn paint_box(
     // belongs to neither, and an arc through it would be invented.
     if radius > 0.0
         && let Some(side) = decoration.uniform_border()
-        && let Some(path) = outline(left, top, right, bottom, radius)
     {
-        surface.set_fill(None);
-        surface.set_stroke(Some(krilla::paint::Stroke {
-            paint: rgb(side.color).into(),
-            width: side.width.get(),
-            ..Default::default()
-        }));
-        surface.draw_path(&path);
-        surface.set_stroke(None);
-        surface.set_fill(None);
+        writer.stroke(
+            &outline(left, top, right, bottom, radius),
+            side.color,
+            side.width.get(),
+        );
         return;
     }
 
@@ -581,22 +589,12 @@ fn paint_box(
         (decoration.border.left, (left, top), (left, bottom)),
     ] {
         let Some(side) = side else { continue };
-        let mut path = krilla::geom::PathBuilder::new();
-        path.move_to(from.0, from.1);
-        path.line_to(to.0, to.1);
-        if let Some(path) = path.finish() {
-            surface.set_fill(None);
-            surface.set_stroke(Some(krilla::paint::Stroke {
-                paint: rgb(side.color).into(),
-                width: side.width.get(),
-                ..Default::default()
-            }));
-            surface.draw_path(&path);
-        }
+        writer.stroke(
+            &[Op::MoveTo(from.0, from.1), Op::LineTo(to.0, to.1)],
+            side.color,
+            side.width.get(),
+        );
     }
-
-    surface.set_stroke(None);
-    surface.set_fill(None);
 }
 
 /// Draws `image` with its top-left corner at `(x, y)`.
@@ -604,93 +602,55 @@ fn paint_box(
 /// A decode failure is silent here: the painter has no way to report, and a
 /// missing logo must not take a 9,000-page render down with it. The measure
 /// phase is where an unreadable image becomes a build diagnostic.
-fn paint_image(
-    surface: &mut krilla::surface::Surface,
-    image: &ImageContent,
-    images: &mut ImageCache,
-    x: Pt,
-    y: Pt,
-) {
-    let key = image.data.as_ptr();
-    let decoded = images
-        .entry(key)
-        .or_insert_with(|| {
-            let data = krilla::Data::from(image.data.to_vec());
-            match image.format {
-                ImageFormat::Png => krilla::image::Image::from_png(data, false),
-                ImageFormat::Jpeg => krilla::image::Image::from_jpeg(data, false),
-            }
-            .ok()
-        })
-        .clone();
-
-    let (Some(decoded), Some(size)) = (
-        decoded,
-        krilla::geom::Size::from_wh(image.width.get(), image.height.get()),
-    ) else {
-        return;
+fn paint_image(writer: &mut PageWriter<'_>, image: &ImageContent, x: Pt, y: Pt) {
+    let format = match image.format {
+        ImageFormat::Png => imprenta_pdf_write::ImageFormat::Png,
+        ImageFormat::Jpeg => imprenta_pdf_write::ImageFormat::Jpeg,
     };
-
-    surface.push_transform(&krilla::geom::Transform::from_translate(x.get(), y.get()));
-    surface.draw_image(decoded, size);
-    surface.pop();
-}
-
-fn rgb(colour: Color) -> krilla::color::rgb::Color {
-    krilla::color::rgb::Color::new(colour.r, colour.g, colour.b)
-}
-
-fn fill(colour: Color) -> krilla::paint::Fill {
-    krilla::paint::Fill {
-        paint: rgb(colour).into(),
-        opacity: krilla::num::NormalizedF32::new(colour.a as f32 / 255.0)
-            .unwrap_or(krilla::num::NormalizedF32::ONE),
-        ..Default::default()
-    }
+    writer.image_data(
+        &image.data,
+        format,
+        x.get(),
+        y.get(),
+        image.width.get(),
+        image.height.get(),
+    );
 }
 
 /// Draws one line's glyphs, stretch by stretch, at `(x, y)`.
 ///
 /// Each stretch is drawn in its own face and colour, so a sentence that turns
 /// bold or changes ink half-way through comes out that way.
-fn paint_line(surface: &mut krilla::surface::Surface, line: &Line, fonts: &Fonts, x: Pt, y: Pt) {
+fn paint_line(writer: &mut PageWriter<'_>, line: &Line, painter: &Painter<'_>, x: Pt, y: Pt) {
     for segment in &line.segments {
         if segment.glyphs.is_empty() {
             continue;
         }
+        let Some(face) = painter.get(segment.face) else {
+            continue;
+        };
 
-        let glyphs: Vec<krilla::text::KrillaGlyph> = segment
+        let glyphs: Vec<imprenta_pdf_write::Glyph> = segment
             .glyphs
             .iter()
-            .map(|g| krilla::text::KrillaGlyph {
-                glyph_id: krilla::text::GlyphId::new(g.id),
-                // krilla wants advances normalised to the em; a line's are
-                // absolute, so they divide back out by the size it was set at.
-                x_advance: g.x_advance / line.size.get(),
-                x_offset: 0.0,
-                y_offset: 0.0,
-                y_advance: 0.0,
-                // The source range is what krilla turns into the ToUnicode
-                // map. Without it the page looks right and the text cannot
-                // be copied.
-                text_range: g.text_range.start as usize..g.text_range.end as usize,
-                location: None,
+            .map(|g| imprenta_pdf_write::Glyph {
+                id: g.id as u16,
+                x_advance: g.x_advance,
+                // The source range is what becomes the ToUnicode map.
+                // Without it the page looks right and the text cannot be
+                // copied.
+                text: g.text_range.start as usize..g.text_range.end as usize,
             })
             .collect();
 
-        // Set explicitly every time: paint state is global to the content
-        // stream, so a fill left over from a box background — or from the
-        // previous stretch — would otherwise colour these glyphs.
-        surface.set_stroke(None);
-        surface.set_fill(Some(fill(segment.color)));
-
-        surface.draw_glyphs(
-            krilla::geom::Point::from_xy((x + segment.x).get(), (y + line.baseline).get()),
-            &glyphs,
-            fonts.get(segment.face).clone(),
-            &line.text,
+        writer.glyphs(
+            face,
             line.size.get(),
-            false,
+            (x + segment.x).get(),
+            (y + line.baseline).get(),
+            &glyphs,
+            &line.text,
+            segment.color,
         );
     }
 }
@@ -845,9 +805,10 @@ mod tests {
     /// The page's drawing operators, uncompressed.
     ///
     /// Assertions run against these rather than against the whole file, and
-    /// against coordinates rather than against krilla's choice of operator:
-    /// it spells a rectangle as an explicit `m`/`l`/`h` path, and that is its
-    /// business. Where the box lands is ours.
+    /// against coordinates rather than against the choice of operator: a
+    /// rectangle is spelled as an explicit `m`/`l`/`h` path so that a square
+    /// box and a rounded one are the same code. Where the box lands is what
+    /// these tests are about.
     fn operators(pdf: &[u8]) -> String {
         let text = String::from_utf8_lossy(pdf);
         text.split("stream\n")
@@ -1211,7 +1172,7 @@ mod tests {
 
         // Compared against a single use rather than against a fixed number:
         // an RGBA png costs two objects, the colour data and its alpha mask,
-        // and that is krilla's business. What matters is that twenty uses
+        // and that is the writer's business. What matters is that twenty uses
         // cost no more than one.
         let render_n = |n: usize| {
             let atoms: Vec<Atom> = (0..n).map(|_| Atom::new(image.height)).collect();
@@ -1483,7 +1444,7 @@ mod tests {
         );
 
         // 12mm top margin + a 40pt spacer above it.
-        // krilla trims trailing digits, so the prefix is what can be asserted.
+        // Trailing digits are trimmed, so the prefix is what can be asserted.
         assert!(
             ops.contains("74.0157"),
             "the canvas ignored its position:\n{ops}"
@@ -1619,8 +1580,8 @@ mod tests {
 
     /// Pulls `(glyph id, text)` pairs out of the PDF's ToUnicode CMap.
     ///
-    /// Hand-rolled rather than pulling in a PDF reader: krilla writes the
-    /// CMap uncompressed, the format is a handful of hex pairs, and a test
+    /// Hand-rolled rather than pulling in a PDF reader: the CMap is written
+    /// uncompressed, the format is a handful of hex pairs, and a test
     /// that parses the bytes we actually emit is a stronger check than one
     /// mediated by another library's tolerance for malformed input.
     fn tounicode_entries(pdf: &[u8]) -> Vec<(u32, String)> {

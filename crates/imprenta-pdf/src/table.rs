@@ -19,8 +19,8 @@
 use crate::content::{BoxContent, Content};
 use crate::decoration::Decoration;
 use crate::measure::{Measured, TextStyle, measure_text_in};
-use crate::parallel::{Faces, chunk_size};
-use crate::shape::{Face, Shaper, report_missing};
+use crate::parallel::{Faces, chunk_size, worth_splitting};
+use crate::shape::{Face, Shaper, report_missing_in};
 use imprenta_core::color::Color;
 use imprenta_core::diagnostic::{Diagnostic, Diagnostics};
 use imprenta_core::units::{Edges, Length, Pt};
@@ -283,9 +283,11 @@ impl Layout {
         padding: Edges<Pt>,
         diagnostics: &mut Diagnostics,
     ) -> Vec<BoxContent> {
-        if rows.len() < PARALLEL_ROWS {
+        if rows.len() < PARALLEL_ROWS || !worth_splitting() {
             // The caller's shaper is already warm. Building one per worker to
-            // measure four rows costs more than the four rows do.
+            // measure four rows costs more than the four rows do — and where
+            // there is no second core to give them to, it costs more than any
+            // number of rows do.
             return rows
                 .iter()
                 .map(|(cells, decoration)| {
@@ -333,56 +335,63 @@ impl Layout {
         column: Column,
         diagnostics: &mut Diagnostics,
     ) -> Content {
-        report_missing(shaper, &cell.text, cell.face, diagnostics);
-
-        let natural = shaper.shape_in(&cell.text, cell.face).width_at(cell.size);
-        let overflows = natural.get() > track.width.get() + 0.01;
-
-        let measured = match column.overflow {
-            Overflow::Wrap => measure_text_in(
-                shaper,
-                &cell.text,
-                TextStyle::new(cell.size),
-                track.width,
-                cell.face,
-            ),
+        // Measured first, and every question about the cell answered from
+        // what that produced. The two questions before it — what the font
+        // could not draw, and whether the value is wider than its column —
+        // used to be asked by shaping the text a *second* time, and on a
+        // ledger that second layout was half of all the time spent
+        // measuring. Neither question needed it.
+        let fitted = match column.overflow {
+            Overflow::Wrap => Fitted {
+                measured: measure_text_in(
+                    shaper,
+                    &cell.text,
+                    TextStyle::new(cell.size),
+                    track.width,
+                    cell.face,
+                ),
+                clipped: false,
+            },
             Overflow::Ellipsis => truncate(shaper, cell, track.width, "…"),
             Overflow::Clip => truncate(shaper, cell, track.width, ""),
         };
+        let Fitted { measured, clipped } = fitted;
 
-        if overflows {
-            match column.overflow {
-                Overflow::Ellipsis | Overflow::Clip => diagnostics.report(
-                    Diagnostic::warning(
-                        "text-clipped",
-                        format!("{:?} was cut to fit its column", short(&cell.text)),
-                    )
-                    .with_hint("widen the column or use overflow: wrap"),
-                ),
-                // A single word with nowhere to break spills over its
-                // neighbour; wrapped text that merely took extra lines has
-                // not gone wrong.
-                Overflow::Wrap => {
-                    let widest = measured
-                        .lines
-                        .iter()
-                        .map(|l| l.width.get())
-                        .fold(0.0f32, f32::max);
-                    if widest > track.width.get() + 0.01 {
-                        diagnostics.report(
-                            Diagnostic::warning(
-                                "cell-overflow",
-                                format!(
-                                    "{:?} overflows its column by {:.1}pt with nowhere to break",
-                                    short(&cell.text),
-                                    widest - track.width.get()
-                                ),
-                            )
-                            .with_hint("widen the column or shorten the value"),
-                        );
-                    }
+        report_missing_in(&measured.lines, diagnostics);
+
+        match column.overflow {
+            Overflow::Ellipsis | Overflow::Clip if clipped => diagnostics.report(
+                Diagnostic::warning(
+                    "text-clipped",
+                    format!("{:?} was cut to fit its column", short(&cell.text)),
+                )
+                .with_hint("widen the column or use overflow: wrap"),
+            ),
+            // A single word with nowhere to break spills over its
+            // neighbour; wrapped text that merely took extra lines has
+            // not gone wrong. The widest line answers it on its own — if
+            // no line is wider than the column, nothing overflowed.
+            Overflow::Wrap => {
+                let widest = measured
+                    .lines
+                    .iter()
+                    .map(|l| l.width.get())
+                    .fold(0.0f32, f32::max);
+                if widest > track.width.get() + 0.01 {
+                    diagnostics.report(
+                        Diagnostic::warning(
+                            "cell-overflow",
+                            format!(
+                                "{:?} overflows its column by {:.1}pt with nowhere to break",
+                                short(&cell.text),
+                                widest - track.width.get()
+                            ),
+                        )
+                        .with_hint("widen the column or shorten the value"),
+                    );
                 }
             }
+            _ => {}
         }
         if measured.lines.is_empty() {
             return Content::Empty;
@@ -420,11 +429,14 @@ fn short(text: &str) -> String {
 /// and "WWWWWWWWWW" at the same place, though one is half the width of the
 /// other. The result is text lost early in some rows and overflowing in
 /// others, and no way to tell which.
-fn truncate(shaper: &mut Shaper, cell: &Cell, width: Pt, marker: &str) -> Measured {
+fn truncate(shaper: &mut Shaper, cell: &Cell, width: Pt, marker: &str) -> Fitted {
     let style = TextStyle::new(cell.size);
     let whole = shaper.shape_in(&cell.text, cell.face);
     if whole.width_at(cell.size).get() <= width.get() {
-        return measure_text_in(shaper, &cell.text, style, width, cell.face);
+        return Fitted {
+            measured: measure_text_in(shaper, &cell.text, style, width, cell.face),
+            clipped: false,
+        };
     }
 
     let marker_width = shaper.shape_in(marker, cell.face).width_at(cell.size).get();
@@ -449,7 +461,22 @@ fn truncate(shaper: &mut Shaper, cell: &Cell, width: Pt, marker: &str) -> Measur
 
     // Re-shaped rather than spliced: the marker kerns against whatever
     // letter it now follows.
-    measure_text_in(shaper, &text, style, Pt(f32::INFINITY), cell.face)
+    Fitted {
+        measured: measure_text_in(shaper, &text, style, Pt(f32::INFINITY), cell.face),
+        clipped: true,
+    }
+}
+
+/// A cell measured to fit its column, and whether anything was cut to do it.
+///
+/// The flag travels with the measurement rather than being worked out again
+/// from the widths afterwards, because the only honest answer is the one the
+/// function that did the cutting already had. Comparing lengths after the
+/// fact gets "WWWWW" wrong: cut to two letters plus an ellipsis it is exactly
+/// as many bytes as it started with.
+struct Fitted {
+    measured: Measured,
+    clipped: bool,
 }
 
 #[cfg(test)]
@@ -1185,6 +1212,40 @@ mod tests {
         }
 
         assert_eq!(d.len(), 1, "50 rows produced {} diagnostics", d.len());
+    }
+
+    #[test]
+    fn a_cell_is_laid_out_once_and_not_twice() {
+        // Every cell used to be laid out twice: once to measure it, and once
+        // more — through `report_missing` — only to ask whether the font
+        // could draw it. On a ledger that second layout was **half** of all
+        // the time spent measuring, and no assertion about a height could see
+        // it, which is why the shaper counts its own layouts and why this
+        // test exists rather than a benchmark that somebody has to remember
+        // to run.
+        //
+        // The text is longer than the single-line shortcut takes, which is
+        // the case a ledger's description column actually is.
+        let long = "Prestacion de servicios profesionales prestados durante el ejercicio";
+        let layout = Layout::new(vec![fixed(200.0)], Pt(200.0));
+        let mut shaper = shaper();
+        let mut d = Diagnostics::default();
+
+        let before = shaper.layouts();
+        layout.row_reporting(
+            &mut shaper,
+            &[Cell::new(long, Pt(8.0))],
+            Decoration::default(),
+            Edges::default(),
+            &mut d,
+        );
+
+        assert_eq!(
+            shaper.layouts() - before,
+            1,
+            "one cell went through the layout engine {} times",
+            shaper.layouts() - before
+        );
     }
 
     #[test]

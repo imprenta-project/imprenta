@@ -13,6 +13,7 @@
  */
 import { parentPort, workerData } from 'node:worker_threads';
 import { Engine, type Printer } from './engine.js';
+import { compile } from './module.js';
 
 export interface BootData {
   wasm: ArrayBuffer;
@@ -26,6 +27,21 @@ export interface BootData {
    * A pool exists to pay that at boot rather than on somebody's request.
    */
   warmups: number;
+  /**
+   * Linear memory, in bytes, above which the instance is replaced once the
+   * document it grew on is finished.
+   *
+   * WebAssembly has no instruction to shrink a memory, so an instance's
+   * footprint is the high-water mark of the largest document it has ever
+   * rendered, for as long as it lives. A service that prints one ledger a
+   * month and invoices the rest of the time would otherwise carry that
+   * ledger's memory from the day it first arrived, once per worker.
+   *
+   * A new instance is the only thing that gives it back. It costs a fresh set
+   * of fonts and a cold start — real, and nothing beside the seconds the
+   * document that tripped it took.
+   */
+  recycleAbove: number;
 }
 
 /** Everything the pool can ask for. One message, one reply, always. */
@@ -38,6 +54,8 @@ export type Request =
   | { id: number; op: 'rows'; json: string }
   | { id: number; op: 'closeTable' }
   | { id: number; op: 'finish'; path?: string }
+  /** How much linear memory this worker's instance is holding. */
+  | { id: number; op: 'memory' }
   // The four passes of a sharded render. See `shard.ts` for why there are
   // four and why they run in this order.
   | { id: number; op: 'measure'; setup: string; head: string; rows: string }
@@ -67,14 +85,32 @@ async function main(): Promise<void> {
   if (!port) throw new Error('this module is only meaningful inside a worker');
   const boot = workerData as BootData;
 
-  const engine = await Engine.load({
-    wasm: new Uint8Array(boot.wasm),
+  // Compiled once and kept. Recycling makes a new *instance* — a new linear
+  // memory — and reuses the module, so the runtime keeps the tiered-up code
+  // the warm-up paid for.
+  const module = await compile(new Uint8Array(boot.wasm));
+  const assets = {
     fonts: boot.fonts.map((f) => ({ ...f, data: new Uint8Array(f.data) })),
     images: boot.images.map((i) => ({ ...i, data: new Uint8Array(i.data) })),
-  });
+  };
+
+  let engine = await Engine.load({ wasm: module, ...assets });
   for (let i = 0; i < boot.warmups; i++) engine.render(WARMUP);
 
   let printer: Printer | null = null;
+
+  /**
+   * Replaces the instance when the document it just finished left it swollen.
+   *
+   * After the reply, never before it: the caller has its bytes and is not
+   * kept waiting for an instantiation it did not ask for. Never while a
+   * document is open either — a session lives inside one instance and cannot
+   * move to another.
+   */
+  const recycle = async (): Promise<void> => {
+    if (printer || engine.memoryBytes <= boot.recycleAbove) return;
+    engine = await Engine.load({ wasm: module, ...assets });
+  };
 
   /**
    * Written from here rather than handed back, so a 128 MB ledger never
@@ -99,6 +135,7 @@ async function main(): Promise<void> {
             { id: request.id, pdf: buffer, pages: out.pages, diagnostics: out.diagnostics },
             [buffer],
           );
+          await recycle();
           return;
         }
         case 'renderToFile': {
@@ -111,6 +148,13 @@ async function main(): Promise<void> {
             bytes: out.bytes,
             diagnostics: out.diagnostics,
           });
+          await recycle();
+          return;
+        }
+        case 'memory': {
+          // Diagnostics, and the only way to see from outside that an
+          // instance was replaced. `pool.test.ts` is what it is for.
+          port.postMessage({ id: request.id, bytes: engine.memoryBytes });
           return;
         }
         case 'measure': {
@@ -137,6 +181,7 @@ async function main(): Promise<void> {
             { id: request.id, pdf: buffer, pages: out.pages, diagnostics: out.diagnostics },
             [buffer],
           );
+          await recycle();
           return;
         }
         case 'fragment': {
@@ -153,6 +198,7 @@ async function main(): Promise<void> {
             { id: request.id, pdf: buffer, pages: out.pages, diagnostics: out.diagnostics },
             [buffer],
           );
+          await recycle();
           return;
         }
         case 'merge': {
@@ -162,6 +208,7 @@ async function main(): Promise<void> {
             { id: request.id, pdf: buffer, pages: out.pages, diagnostics: out.diagnostics },
             [buffer],
           );
+          await recycle();
           return;
         }
         case 'open':
@@ -203,6 +250,7 @@ async function main(): Promise<void> {
               [buffer],
             );
           }
+          await recycle();
           return;
         }
       }

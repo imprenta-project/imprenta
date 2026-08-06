@@ -6,14 +6,14 @@
 //! measured on a ledger. At fifty thousand pages that is twenty gigabytes,
 //! and the engine cannot produce the documents it was built for.
 //!
-//! Almost none of that is the PDF writer. The same measurement puts krilla's
-//! own retention at **15.5 KB per page** — it keeps every page until
-//! `finish()` because an annotation may point at a page not yet written, and
-//! that floor cannot be lowered from outside. The other **96 % is ours**:
-//! atoms, shaped lines and glyph runs kept alive long after they were painted.
+//! Almost none of that was the PDF writer, and what was of it is gone: the
+//! writer this engine used to embed kept every painted page until the
+//! document closed, and `imprenta-pdf-write` keeps a sixteen-byte offset. The
+//! other **96 % is ours**: atoms, shaped lines and glyph runs kept alive long
+//! after they were painted.
 //!
-//! So the fix is not to stream the writer. It is to stop holding our own
-//! side: feed content in, pack what is settled, paint it, drop it.
+//! So the fix was never only to stream the writer. It is to stop holding our
+//! own side: feed content in, pack what is settled, paint it, drop it.
 //!
 //! # Why releasing a page is safe
 //!
@@ -117,6 +117,8 @@ pub struct Composer {
 
     /// Whether nothing may be painted until the last page is packed.
     hold: bool,
+    /// Whether nothing is to be painted at all.
+    blind: bool,
     /// Known only once nothing more can arrive — unless a fragment was told.
     total: Option<usize>,
     /// The number this composer's first page carries. One, unless this is a
@@ -134,10 +136,15 @@ impl Composer {
         fonts: Fonts,
         options: Options,
     ) -> Result<Self, RenderError> {
+        // The faces are handed to the writer here rather than at the first
+        // page, so a font nobody can read is an error before a single row has
+        // been measured.
+        let mut sink = PageSink::new(geometry, options)?;
+        sink.register(&fonts)?;
         Ok(Self {
             geometry,
             fonts,
-            sink: PageSink::new(geometry, options)?,
+            sink,
             atoms: Vec::new(),
             contents: Vec::new(),
             released: 0,
@@ -148,6 +155,7 @@ impl Composer {
             prefixes: HashMap::new(),
             totals: Vec::new(),
             hold: false,
+            blind: false,
             total: None,
             first_page: 1,
         })
@@ -173,6 +181,13 @@ impl Composer {
     pub fn resuming(mut self, page: usize, total: usize, opening: Vec<f64>) -> Self {
         self.first_page = page;
         self.total = Some(total);
+        // Neither of the two ways of not knowing the total applies any more.
+        // Both are reached first by every wired path — a session opens, sees
+        // `{{pages}}` in a band, and is told which piece of the document it
+        // is afterwards — so leaving either standing would make the flat
+        // sharded render this method documents true only by accident.
+        self.blind = false;
+        self.hold = false;
         if !opening.is_empty() {
             self.carried = opening;
         }
@@ -265,8 +280,12 @@ impl Composer {
     }
 
     /// Pages finished so far.
+    ///
+    /// Counted here rather than asked of the sink, because a composer that is
+    /// [`counting`](Self::counting) never gives the sink a page and would
+    /// otherwise report none.
     pub fn pages(&self) -> usize {
-        self.sink.pages()
+        self.totals.len()
     }
 
     /// What each finished page opened and closed at.
@@ -287,6 +306,44 @@ impl Composer {
     pub fn holding_pages(mut self) -> Self {
         self.hold = true;
         self
+    }
+
+    /// Packs and releases pages without painting any of them.
+    ///
+    /// This is how a document learns its own length without paying for it.
+    /// Nothing can know the total until the last page is packed, so a footer
+    /// saying "de 4 849" used to be bought by holding every painted page to
+    /// the end — twenty-three times the memory of the same ledger without it,
+    /// measured, and the largest single reason a long one trapped.
+    ///
+    /// A counting pass buys the same answer by throwing the pages away as it
+    /// gets them: the atoms are measured, packed and dropped exactly as they
+    /// would be in a real render, and what survives is the count. The
+    /// document is then walked a second time and painted with
+    /// [`resuming`](Self::resuming), which is a fragment that happens to be
+    /// the whole thing.
+    ///
+    /// It has to be the *same* pack, reached the same way. A cheaper estimate
+    /// of how many pages a document runs to would be a second paginator, and
+    /// the two would disagree on precisely the documents that print their own
+    /// length. That is also why the bands are not built here: they cost a
+    /// shaping run per page and cannot move a page boundary, because the room
+    /// they take was already taken out of the geometry.
+    pub fn counting(mut self) -> Self {
+        self.blind = true;
+        self.hold = false;
+        self
+    }
+
+    /// Feeds nothing more and says how many pages the document runs to.
+    ///
+    /// The counterpart of [`finish`](Self::finish) for a composer that is
+    /// [`counting`](Self::counting): there are no bytes to hand back, and the
+    /// only thing the pass was for is this number.
+    pub fn count(mut self) -> usize {
+        let packed = self.pack_pending();
+        self.release(&packed, &mut |_| Painted::default());
+        self.totals.len()
     }
 
     /// Paints and releases every page that can no longer change, with no
@@ -373,24 +430,30 @@ impl Composer {
         let mut highest = None;
 
         for page in pages {
-            let contents = &self.contents;
-            let prefixes = &self.prefixes;
-            let painted = bands(&PageContext {
-                number: self.first_page + self.totals.len(),
-                total: self.total,
-                opening: page.opening.clone(),
-                closing: page.closing.clone(),
-            });
-            self.sink.paint_page_with(
-                page,
-                &self.fonts,
-                |atom| {
-                    atom.checked_sub(base)
-                        .and_then(|i| contents.get(i))
-                        .or_else(|| prefixes.get(&atom))
-                },
-                &painted,
-            );
+            // A counting pass skips both the bands and the paint. The bands
+            // are skipped because building one shapes text, once per page,
+            // for glyphs nobody will look at; the paint because the whole
+            // point of the pass is that there is nothing to keep.
+            if !self.blind {
+                let contents = &self.contents;
+                let prefixes = &self.prefixes;
+                let painted = bands(&PageContext {
+                    number: self.first_page + self.totals.len(),
+                    total: self.total,
+                    opening: page.opening.clone(),
+                    closing: page.closing.clone(),
+                });
+                self.sink.paint_page_with(
+                    page,
+                    &self.fonts,
+                    |atom| {
+                        atom.checked_sub(base)
+                            .and_then(|i| contents.get(i))
+                            .or_else(|| prefixes.get(&atom))
+                    },
+                    &painted,
+                );
+            }
             self.totals.push(PageTotals {
                 opening: page.opening.clone(),
                 closing: page.closing.clone(),
@@ -653,7 +716,6 @@ mod tests {
         }
         composer.repeat(first..first + 401, first, header_height);
 
-        let mut composer = composer;
         composer.flush();
         let pdf = composer.finish().unwrap().pdf;
 
@@ -1073,6 +1135,32 @@ mod bands {
         assert!(
             composer.pages() > 0,
             "a fragment that knows its total must still release pages as it goes"
+        );
+    }
+
+    #[test]
+    fn being_told_the_total_undoes_the_hold_it_was_the_only_reason_for() {
+        // The two builders are reached in this order by every wired path: a
+        // session opens, sees `{{pages}}` in a band and holds, and only then
+        // is told which piece of the document it is. Holding is a bet that
+        // nobody knows the total yet, and `resuming` is somebody knowing it —
+        // so the bet has to be called off, or a sharded ledger whose footer
+        // says "de 4 849" quietly holds every page it paints, which is the
+        // one thing the sharded path exists to not do.
+        let (fonts, mut shaper) = parts();
+        let mut composer = Composer::new(geometry(), fonts)
+            .unwrap()
+            .holding_pages()
+            .resuming(1, 99, Vec::new());
+
+        for (atom, content) in rows(&mut shaper, 60) {
+            composer.push(atom, content);
+        }
+        composer.flush();
+
+        assert!(
+            composer.pages() > 0,
+            "told there are 99 pages and still holding its own"
         );
     }
 

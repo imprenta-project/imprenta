@@ -64,6 +64,18 @@ export interface RenderOptions {
    * spend the whole pool on other requests than on this document.
    */
   shard?: boolean;
+  /**
+   * Linear memory, in bytes, above which an engine is replaced once the
+   * document that grew it is finished. Defaults to 64 MB; `Infinity` keeps
+   * every engine for the life of the process.
+   *
+   * WebAssembly memory only ever grows — there is no instruction to shrink
+   * one — so an engine's footprint is the high-water mark of the largest
+   * document it has ever rendered. Without this, a service that prints one
+   * ledger a month carries that ledger's memory from the day it arrived,
+   * once per engine in the pool.
+   */
+  recycleAbove?: number;
 }
 
 export interface RenderResult {
@@ -95,6 +107,7 @@ const pools = new Map<string, Promise<Pool>>();
 function keyFor(options: RenderOptions): string {
   const parts = [
     String(options.size ?? ''),
+    String(options.recycleAbove ?? ''),
     ...options.fonts.map(
       (f) => `${f.weight ?? 'regular'}/${f.italic ? 'i' : 'r'}/${f.data.length}`,
     ),

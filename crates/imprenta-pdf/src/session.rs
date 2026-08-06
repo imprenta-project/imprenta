@@ -10,7 +10,7 @@
 //! and nothing is held but the tail. What comes out is byte for byte what
 //! `build` would have produced from the whole thing.
 
-use crate::build::{Assets, BuildError, Built, OpenTable, Walk};
+use crate::build::{Assets, BandSpec, BuildError, Built, OpenTable, Walk};
 use crate::compose::Composer;
 use crate::ir;
 use crate::render::{Fonts, Geometry, Options};
@@ -73,6 +73,32 @@ pub struct Session {
     open: Option<OpenTable>,
     bands: Bands,
     names: Vec<String>,
+    /// Everything the composer would need to be built a second time. Only a
+    /// document that prints its own length ever needs that, and it is two
+    /// words either way.
+    geometry: Geometry,
+    options: Options,
+    accumulators: usize,
+    /// The pieces as they arrived, kept only when a band prints `{{pages}}`.
+    ///
+    /// Nothing can know how many pages there are until the last one is
+    /// packed, and a declared document answers that by being walked twice —
+    /// an IR is inert data that is already in memory, so the second walk is
+    /// free. A fed document has no such thing: its rows are gone the moment
+    /// they have been read.
+    ///
+    /// So it keeps them. What it used to keep instead was every *painted*
+    /// page, and the difference is the whole point: measured on a ledger, a
+    /// row weighs a few hundred bytes where the page it lands on weighs six
+    /// kilobytes. Keeping the input is an order of magnitude cheaper than
+    /// keeping the output, and unlike asking the producer to send its rows
+    /// twice it costs the caller nothing at all.
+    ///
+    /// It is still linear in the document, which is why it is `None` for
+    /// every document that does not ask — and worth saying out loud, because
+    /// `{{pages}}` is the one place this engine is not flat and there must
+    /// not be a second, quieter one.
+    replay: Option<Vec<Chunk>>,
 }
 
 impl Session {
@@ -111,10 +137,11 @@ impl Session {
                 footer: bands.footer.as_ref().map_or(Pt(0.0), |b| b.height),
             },
         };
+        let counting = bands.needs_total();
         let mut composer =
             Composer::with_options(geometry, fonts, options)?.with_accumulators(accumulators);
-        if bands.needs_total() {
-            composer = composer.holding_pages();
+        if counting {
+            composer = composer.counting();
         }
         Ok(Self {
             width: geometry.width - geometry.margin.horizontal(),
@@ -125,6 +152,10 @@ impl Session {
             open: None,
             bands,
             names: Vec::new(),
+            geometry,
+            options,
+            accumulators,
+            replay: counting.then(Vec::new),
         })
     }
 
@@ -137,6 +168,11 @@ impl Session {
     /// started**, which is what [`crate::build::plan`] is for.
     pub fn resuming(mut self, page: usize, total: usize, opening: Vec<f64>) -> Self {
         self.composer = self.composer.resuming(page, total, opening);
+        // A fragment is *told* the total, so there is nothing to count and
+        // nothing to keep. Dropped here rather than left to fill up, which is
+        // what made the sharded path hold a whole fragment while documenting
+        // that it did not.
+        self.replay = None;
         self
     }
 
@@ -162,10 +198,30 @@ impl Session {
             let content = crate::content::Content::Box(row.clone().into_content());
             self.composer.push(atom, content);
             if self.composer.pending() >= 256 {
-                self.composer.flush();
+                self.walk().flush();
             }
         }
         Ok(())
+    }
+
+    /// The walk, with everything it borrows from this session.
+    ///
+    /// One place rather than three, because the thing worth getting right is
+    /// that it carries the bands: a page painted without them is finished and
+    /// nothing comes back to put a footer on it later.
+    fn walk(&mut self) -> Walk<'_> {
+        Walk {
+            shaper: &mut self.shaper,
+            assets: &self.assets,
+            diagnostics: &mut self.diagnostics,
+            composer: &mut self.composer,
+            pending_break: None,
+            band: BandSpec {
+                bands: &self.bands,
+                names: &self.names,
+                width: self.width,
+            },
+        }
     }
 
     /// Reads one piece.
@@ -174,17 +230,37 @@ impl Session {
     /// document does. There is no second layout path here to disagree with
     /// the first one.
     pub fn feed(&mut self, chunk: &Chunk) -> Result<(), BuildError> {
-        let width = self.width;
-        let mut walk = Walk {
-            shaper: &mut self.shaper,
-            assets: &self.assets,
-            diagnostics: &mut self.diagnostics,
-            composer: &mut self.composer,
-            pending_break: None,
-        };
+        if self.replay.is_some() {
+            // Cloned only here: a document that will be walked twice has to
+            // keep what it was given, and a caller that can hand the piece
+            // over outright should use `feed_owned` and save the copy.
+            return self.feed_owned(chunk.clone());
+        }
+        self.read(chunk)
+    }
 
+    /// As [`feed`](Self::feed), taking the piece rather than borrowing it.
+    ///
+    /// Worth having only for a document that prints its own length, which is
+    /// the one that keeps its pieces — and that is exactly the document where
+    /// a copy of every row would be the most expensive thing in the process.
+    pub fn feed_owned(&mut self, chunk: Chunk) -> Result<(), BuildError> {
+        self.read(&chunk)?;
+        if let Some(replay) = &mut self.replay {
+            replay.push(chunk);
+        }
+        Ok(())
+    }
+
+    fn read(&mut self, chunk: &Chunk) -> Result<(), BuildError> {
+        let width = self.width;
+        // The open table is lifted out before the walk is built and put back
+        // after. It reads as ceremony and is not: the walk borrows the whole
+        // session so that it can carry the bands, and a table held in a field
+        // alongside would be a second borrow of the same thing.
         match chunk {
             Chunk::Nodes(nodes) => {
+                let mut walk = self.walk();
                 for node in nodes {
                     walk.node(node, width)?;
                 }
@@ -193,24 +269,28 @@ impl Session {
                 // A table already open is closed first rather than nested:
                 // the IR has no nested tables, and silently discarding the
                 // first one would lose its rows.
-                if let Some(open) = self.open.take() {
+                let previous = self.open.take();
+                let mut walk = self.walk();
+                if let Some(open) = previous {
                     walk.close_table(open);
                 }
-                self.open = Some(walk.open_table(head, width));
+                let opened = walk.open_table(head, width);
+                self.open = Some(opened);
             }
             Chunk::Rows(rows) => {
-                let open = self
+                let mut open = self
                     .open
-                    .as_mut()
+                    .take()
                     .ok_or(BuildError::OutOfOrder(OutOfOrder::RowsWithNoTable))?;
-                walk.table_rows(open, rows);
+                self.walk().table_rows(&mut open, rows);
+                self.open = Some(open);
             }
             Chunk::CloseTable => {
                 let open = self
                     .open
                     .take()
                     .ok_or(BuildError::OutOfOrder(OutOfOrder::CloseWithNoTable))?;
-                walk.close_table(open);
+                self.walk().close_table(open);
             }
         }
         Ok(())
@@ -228,14 +308,10 @@ impl Session {
     /// get the pages that did arrive.
     pub fn finish(mut self) -> Result<Built, BuildError> {
         if let Some(open) = self.open.take() {
-            let mut walk = Walk {
-                shaper: &mut self.shaper,
-                assets: &self.assets,
-                diagnostics: &mut self.diagnostics,
-                composer: &mut self.composer,
-                pending_break: None,
-            };
-            walk.close_table(open);
+            self.walk().close_table(open);
+        }
+        if let Some(chunks) = self.replay.take() {
+            return self.count_then_paint(chunks);
         }
         let Session {
             mut shaper,
@@ -261,6 +337,59 @@ impl Session {
             pdf: composed.pdf,
             diagnostics: diagnostics.iter().map(|d| d.to_string()).collect(),
         })
+    }
+
+    /// Takes the count off the pass that has just run, then paints the same
+    /// pieces again knowing it.
+    ///
+    /// The second composer is `resuming(1, total, …)` — a fragment that
+    /// happens to be the whole document. There is nothing special about being
+    /// the whole of something, which is why this needs no machinery of its
+    /// own beyond being told the number.
+    fn count_then_paint(self, chunks: Vec<Chunk>) -> Result<Built, BuildError> {
+        let Session {
+            shaper,
+            assets,
+            composer,
+            width,
+            bands,
+            names,
+            geometry,
+            options,
+            accumulators,
+            ..
+        } = self;
+
+        let total = composer.count();
+        // The shaper carries on into the second pass rather than being built
+        // again: its faces are the parsed font files, and a second copy of
+        // those would be embedded as a second subset.
+        let fonts = Fonts::from_shaper(&shaper)?;
+
+        // The diagnostics of the counting pass are dropped rather than kept:
+        // the second walk measures the same text through the same shaper and
+        // will report every one of them again, and a reader told twice that a
+        // font has no glyph for "日" would reasonably conclude there were two.
+        let mut second = Session {
+            composer: Composer::with_options(geometry, fonts, options)?
+                .with_accumulators(accumulators)
+                .resuming(1, total, Vec::new()),
+            shaper,
+            assets,
+            diagnostics: Diagnostics::default(),
+            width,
+            open: None,
+            bands,
+            names,
+            geometry,
+            options,
+            accumulators,
+            replay: None,
+        };
+        for chunk in chunks {
+            second.feed_owned(chunk)?;
+        }
+        second.finish()
     }
 }
 
@@ -434,6 +563,151 @@ mod tests {
             longer < 400,
             "a page of rows is nothing like {longer} atoms"
         );
+    }
+
+    #[test]
+    fn a_fed_document_carries_its_bands_on_every_page_it_releases() {
+        // A session releases pages as the rows arrive, which is the whole
+        // point of it. Those pages used to be painted through the bandless
+        // flush, so a ledger streamed in from a database came out with a
+        // footer on its last page and nowhere else — and because the pages
+        // were dropped as they were painted, nothing ever came back to notice.
+        let readable = Options { compress: false };
+        let runs = |pdf: &[u8]| {
+            let text = String::from_utf8_lossy(pdf);
+            text.matches("Tj").count() + text.matches("TJ").count()
+        };
+
+        let feed = |bands: Bands| {
+            let mut session =
+                Session::open_with(ir::PageSetup::default(), bands, 0, assets(), readable).unwrap();
+            session.feed(&Chunk::OpenTable(head())).unwrap();
+            for batch in 0..12 {
+                session
+                    .feed(&Chunk::Rows(rows(batch * 100, batch * 100 + 100)))
+                    .unwrap();
+            }
+            session.feed(&Chunk::CloseTable).unwrap();
+            session.finish().unwrap()
+        };
+
+        let bare = feed(Bands::none());
+        let footed = feed(Bands {
+            header: None,
+            footer: Some(ir::Band {
+                height: Pt(20.0),
+                children: vec![ir::Node::Text(ir::Text {
+                    runs: vec![ir::Run::new("Pagina {{page}}")],
+                    style: ir::TextStyle::default(),
+                })],
+            }),
+        });
+
+        assert!(bare.pages > 10, "the sample must release many times over");
+        assert_eq!(
+            runs(&footed.pdf) - runs(&bare.pdf),
+            footed.pages,
+            "only {} of {} pages carried a footer",
+            runs(&footed.pdf) - runs(&bare.pdf),
+            footed.pages
+        );
+    }
+
+    #[test]
+    fn a_fed_document_that_prints_its_length_is_the_declared_one() {
+        // The strongest form of the claim, and the reason the streaming path
+        // may keep the pieces it was fed at all: a ledger whose footer says
+        // "de 18" must come out as the very bytes the same ledger declared
+        // whole produces. Same pagination, same footers, same order.
+        let footer = ir::Band {
+            height: Pt(20.0),
+            children: vec![ir::Node::Text(ir::Text {
+                runs: vec![ir::Run::new("Pagina {{page}} de {{pages}}")],
+                style: ir::TextStyle::default(),
+            })],
+        };
+        let head = head();
+        let declared = build(
+            &ir::Document {
+                page: ir::PageSetup::default(),
+                header: None,
+                footer: Some(footer.clone()),
+                accumulators: Vec::new(),
+                children: vec![ir::Node::Table(ir::Table {
+                    columns: head.columns.clone(),
+                    header: head.header.clone(),
+                    rows: rows(0, 1_200),
+                    repeat_header: head.repeat_header,
+                    padding: head.padding,
+                    space_after: head.space_after,
+                })],
+            },
+            &assets(),
+            Options::default(),
+        )
+        .unwrap();
+
+        let mut session = Session::open_with(
+            ir::PageSetup::default(),
+            Bands {
+                header: None,
+                footer: Some(footer),
+            },
+            0,
+            assets(),
+            Options::default(),
+        )
+        .unwrap();
+        session.feed(&Chunk::OpenTable(head)).unwrap();
+        for batch in 0..12 {
+            session
+                .feed(&Chunk::Rows(rows(batch * 100, batch * 100 + 100)))
+                .unwrap();
+        }
+        session.feed(&Chunk::CloseTable).unwrap();
+        let fed = session.finish().unwrap();
+
+        assert!(declared.pages > 10, "the sample must paginate");
+        assert_eq!(fed.pages, declared.pages);
+        assert_eq!(fed.pdf, declared.pdf);
+    }
+
+    #[test]
+    fn the_pass_that_counts_a_fed_document_says_nothing_twice() {
+        let mut session = Session::open_with(
+            ir::PageSetup::default(),
+            Bands {
+                header: None,
+                footer: Some(ir::Band {
+                    height: Pt(20.0),
+                    children: vec![ir::Node::Text(ir::Text {
+                        runs: vec![ir::Run::new("{{page}}/{{pages}}")],
+                        style: ir::TextStyle::default(),
+                    })],
+                }),
+            },
+            0,
+            assets(),
+            Options::default(),
+        )
+        .unwrap();
+        session.feed(&Chunk::OpenTable(head())).unwrap();
+        session
+            .feed(&Chunk::Rows(vec![ir::Row {
+                cells: vec![ir::Cell::new("001"), ir::Cell::new("日本語")],
+                ..Default::default()
+            }]))
+            .unwrap();
+        session.feed(&Chunk::CloseTable).unwrap();
+
+        let built = session.finish().unwrap();
+
+        let missing: Vec<_> = built
+            .diagnostics
+            .iter()
+            .filter(|d| d.contains("missing-glyph"))
+            .collect();
+        assert_eq!(missing.len(), 1, "{:?}", built.diagnostics);
     }
 
     #[test]

@@ -88,8 +88,8 @@ impl Face {
 /// size to get points.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Glyph {
-    /// u32 to match both parley (which produces it) and krilla (which
-    /// consumes it), even though OpenType glyph ids are 16-bit.
+    /// u32 to match parley, which produces it, even though OpenType glyph
+    /// ids are 16-bit and the writer narrows it back down.
     pub id: u32,
     pub x_advance: f32,
     /// Byte range in the source string this glyph came from. Needed to emit a
@@ -115,19 +115,42 @@ pub struct ShapedRun {
 /// page looks deliberate and a character is simply gone.
 pub const NOTDEF: u32 = 0;
 
+/// The characters no glyph was found for, read off text that has already
+/// been laid out.
+///
+/// This is the cheap half of a lesson. The check used to shape the text a
+/// second time to ask the question, which on a ledger was **half of all the
+/// time spent measuring** — every cell went through the layout engine twice,
+/// once for its size and once for this. The lines already hold the answer:
+/// a glyph that came back as [`NOTDEF`] is a character the face could not
+/// draw, and it carries the byte range it came from.
+pub fn missing_in(lines: &[Line]) -> String {
+    let mut out = String::new();
+    for line in lines {
+        for glyph in line
+            .segments
+            .iter()
+            .flat_map(|s| &s.glyphs)
+            .filter(|g| g.id == NOTDEF)
+        {
+            let range = glyph.text_range.start as usize..glyph.text_range.end as usize;
+            for c in line.text.get(range).into_iter().flat_map(str::chars) {
+                if !out.contains(c) {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Warns about characters the chosen face cannot draw.
 ///
 /// Shared rather than written at each call site because silence is the whole
 /// danger here: a face with no glyph for a character prints an empty box, and
 /// an engine that only noticed inside table cells let a page of Japanese
 /// through without a word.
-pub fn report_missing(
-    shaper: &mut Shaper,
-    text: &str,
-    face: Face,
-    diagnostics: &mut imprenta_core::diagnostic::Diagnostics,
-) {
-    let missing = shaper.shape_in(text, face).missing(text);
+pub fn report(missing: &str, diagnostics: &mut imprenta_core::diagnostic::Diagnostics) {
     if missing.is_empty() {
         return;
     }
@@ -138,6 +161,11 @@ pub fn report_missing(
         )
         .with_hint("those characters print as empty boxes; pick a font that covers them"),
     );
+}
+
+/// As [`report`], for text that has been laid out.
+pub fn report_missing_in(lines: &[Line], diagnostics: &mut imprenta_core::diagnostic::Diagnostics) {
+    report(&missing_in(lines), diagnostics);
 }
 
 /// What parley carries through shaping on our behalf: the index of the
@@ -193,6 +221,14 @@ pub struct Shaper {
     cache: HashMap<(Face, String), ShapedRun>,
     hits: u64,
     misses: u64,
+    /// How many times text has been handed to the layout engine.
+    ///
+    /// Not a curiosity. Every table cell used to be laid out twice — once to
+    /// measure it and once to ask whether the font could draw it — and on a
+    /// ledger that second layout was half of all the time spent measuring.
+    /// It is waste that no assertion about a height can see, so it is counted
+    /// and asserted on directly.
+    layouts: u64,
 }
 
 impl Shaper {
@@ -254,6 +290,7 @@ impl Shaper {
             cache: HashMap::new(),
             hits: 0,
             misses: 0,
+            layouts: 0,
         };
         shaper.sample_metrics();
         shaper
@@ -329,6 +366,7 @@ impl Shaper {
         // serves every size the run is ever drawn at.
         const EM: f32 = 1000.0;
 
+        self.layouts += 1;
         let stack = self.stack();
         let mut builder = self
             .layout_cx
@@ -410,6 +448,7 @@ impl Shaper {
         }
 
         let styles: Vec<(Face, Color)> = runs.iter().map(|r| (r.face, r.color)).collect();
+        self.layouts += 1;
         let stack = self.stack();
         let mut builder = self
             .layout_cx
@@ -451,6 +490,7 @@ impl Shaper {
             return vec![line];
         }
 
+        self.layouts += 1;
         let stack = self.stack();
         let mut builder = self
             .layout_cx
@@ -483,15 +523,38 @@ impl Shaper {
                 let mut segments = Vec::new();
                 let mut x = 0.0f32;
 
+                // Where the current run's glyphs have been read up to. A line
+                // that changes style part-way through is several *glyph* runs
+                // over one parley run, and each of them walks that run's
+                // clusters from the beginning: without this, the bold half of
+                // "Total 1.234,00" is handed the source ranges of "Total ",
+                // and every glyph in it claims to stand for the wrong letter.
+                //
+                // Nothing on the page moves, which is what makes it worth a
+                // comment. What breaks is the `ToUnicode` map built from
+                // these ranges — the document looks perfect and the text
+                // copies out as nonsense.
+                let mut taken = 0usize;
+                let mut run_at: Option<std::ops::Range<usize>> = None;
+
                 for item in line.items() {
                     let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                         continue;
                     };
-                    let mut clusters = glyph_run.run().visual_clusters().flat_map(|cluster| {
-                        let r = cluster.text_range();
-                        let range = r.start as u32..r.end as u32;
-                        cluster.glyphs().map(move |_| range.clone())
-                    });
+                    let run_range = glyph_run.run().text_range();
+                    if run_at.as_ref() != Some(&run_range) {
+                        run_at = Some(run_range);
+                        taken = 0;
+                    }
+                    let mut clusters = glyph_run
+                        .run()
+                        .visual_clusters()
+                        .flat_map(|cluster| {
+                            let r = cluster.text_range();
+                            let range = r.start as u32..r.end as u32;
+                            cluster.glyphs().map(move |_| range.clone())
+                        })
+                        .skip(taken);
 
                     let mut glyphs = Vec::new();
                     let mut advance = 0.0f32;
@@ -514,6 +577,7 @@ impl Shaper {
                         .copied()
                         .unwrap_or((fallback, Color::BLACK));
 
+                    taken += glyphs.len();
                     segments.push(Segment {
                         glyphs,
                         face,
@@ -577,6 +641,11 @@ impl Shaper {
 
     pub fn hits(&self) -> u64 {
         self.hits
+    }
+
+    /// How many times text has been handed to the layout engine.
+    pub fn layouts(&self) -> u64 {
+        self.layouts
     }
 
     pub fn misses(&self) -> u64 {
@@ -806,7 +875,7 @@ mod tests {
     fn the_glyphs_come_from_the_vendored_font_and_no_other() {
         // Registering a font puts it in the collection; it does not select
         // it. Without an explicit font stack parley falls back to a system
-        // font, krilla draws those ids against Roboto, and every letter
+        // font, the writer draws those ids against Roboto, and every letter
         // comes out shifted — a page of plausible-looking gibberish that
         // every metric test in this file happily passes.
         //
@@ -1542,6 +1611,56 @@ mod tests {
                 g.text_range
             );
         }
+    }
+
+    #[test]
+    fn every_glyph_of_a_styled_line_names_the_letter_it_actually_draws() {
+        // The failure this catches is invisible on paper. Each glyph carries
+        // the byte range it came from, and that range is what becomes the
+        // PDF's ToUnicode map — so a document can look flawless and copy out
+        // as "uno uno". It went wrong at exactly one place: a line that
+        // changes style is several glyph runs over *one* shaped run, and
+        // walking that run's clusters afresh for each of them starts the
+        // second stretch back at the first letter of the first.
+        //
+        // Reading the source back through the ranges is the whole test: if
+        // they name the right letters, the map is right.
+        //
+        // Two stretches in the same face and different ink, which is the
+        // shape that actually breaks it. A bold stretch is a different font,
+        // so parley makes it its own run and the walk restarts correctly by
+        // accident; a red stretch of the same face is one run split in two by
+        // the brush, and that is the case nothing else covers.
+        let mut s = family();
+
+        let line = s
+            .break_rich(
+                &[
+                    TextRun::new("Total ").inked(Color::BLACK),
+                    TextRun::new("1.234,00").inked(Color::rgb(200, 0, 0)),
+                ],
+                Pt(9.0),
+                Pt(400.0),
+            )
+            .remove(0);
+
+        let mut rebuilt = String::new();
+        let mut previous: Option<Range<u32>> = None;
+        for glyph in line.glyphs() {
+            // Several glyphs can share one cluster — a decomposed accent —
+            // and the cluster's characters are named once.
+            if previous.as_ref() == Some(&glyph.text_range) {
+                continue;
+            }
+            rebuilt.push_str(
+                line.text
+                    .get(glyph.text_range.start as usize..glyph.text_range.end as usize)
+                    .expect("a glyph range must slice its own source"),
+            );
+            previous = Some(glyph.text_range.clone());
+        }
+
+        assert_eq!(rebuilt, *line.text, "the glyphs spell something else");
     }
 
     #[test]

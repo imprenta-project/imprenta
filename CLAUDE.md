@@ -66,6 +66,7 @@ pnpm --filter backend start                             # a controller returning
 crates/
   imprenta-core/       units, colour, diagnostics, IR envelope — format-neutral
   imprenta-pdf/        the page engine: measure → pack → paint
+  imprenta-pdf-write/  the bytes: objects out as they close, xref at the end
   imprenta-xlsx/       the spreadsheet writer: a workbook model → OOXML
   imprenta-pdf-wasm/   the page engine as a WebAssembly module; imports nothing
   imprenta-xlsx-wasm/  the sheet writer as one too; a separate module, deliberately
@@ -80,9 +81,10 @@ examples/
   backend/         React in, PDF or XLSX bytes out, no CLI anywhere
 ```
 
-Dependencies point one way: `core → {pdf, xlsx} → wasm → the packages → the CLI`.
-`@imprentajs/react` depends on React and nothing else — keep it that way, so a
-document can be declared where the engines cannot be installed.
+Dependencies point one way: `core → {pdf-write, pdf, xlsx} → wasm → the
+packages → the CLI`. `@imprentajs/react` depends on React and nothing else —
+keep it that way, so a document can be declared where the engines cannot be
+installed.
 
 ## One binding, and why it is WebAssembly
 
@@ -155,9 +157,13 @@ Two rules follow, and most bugs here come from breaking one of them:
   *kind* of thing an atom is means the abstraction is wrong; a new arithmetic
   property on `Atom` — `grow`, which asks how much of the page is left — is the
   exception, because that answer exists nowhere else.
-- **Composition streams.** Pages are painted and dropped as content arrives, so
-  memory is flat per page regardless of length. Anything that holds all pages —
-  `<PageCount />` is the only one today — must say so out loud.
+- **Composition streams, and so does the writer.** Pages are painted and
+  dropped as content arrives, and a painted page is written into the file
+  immediately — what survives it is its bytes and one cross-reference entry.
+  Memory is flat per page regardless of length. Anything that is not flat must
+  say so out loud; `<PageCount />` is the one that does, because nothing can
+  know how many pages there are until the last one is packed, and it pays for
+  the answer with a second walk rather than by holding the document.
 
 No HTML, no CSS engine, no browser. The IR is versioned JSON and the engine does
 not know React exists.
@@ -212,6 +218,17 @@ deliberately does not do.
   **Adjacent tagging — `tag` *and* `content` — does not buffer**, and a
   hand-written reader for one is wasted work. `#[serde(untagged)]` always does,
   which is what `Color` used to use and what most of a styled cell cost.
+- **A page that is written is finished.** The writer puts a page in the file
+  the moment it closes, so anything not painted by then is not on it and
+  nothing comes back to notice. That is how a declared ledger of 1 200 rows
+  shipped with a footer on one page of eighteen: the walk flushed through a
+  bandless `flush`, every released page came out bare, and every test was
+  written around a document short enough never to flush.
+- **A `Vec` that grows to tens of megabytes is a WebAssembly leak.** Doubling
+  frees the old buffer, linear memory never shrinks, and the hole is held for
+  the life of the instance. The output buffer alone was 57 MB of a 79 MB
+  footprint for a 22 MB file; `imprenta-pdf-write`'s `blocks.rs` is the answer
+  and the reasoning.
 - **The size of a hot type is its memory profile.** A `Style` sat inline in
   `xlsx::ir::Cell` and made every cell 168 bytes whether or not it had one;
   boxing it took a row from 2,380 bytes to 1,560. Reason about what is big and

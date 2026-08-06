@@ -16,7 +16,7 @@ use crate::image::{ImageError, identify};
 use crate::ir;
 use crate::list::{List, Marker};
 use crate::render::{Bands, Fonts, Geometry, Options, RenderError};
-use crate::shape::{Face, Shaper, TextRun, Weight, report_missing};
+use crate::shape::{Face, Shaper, TextRun, Weight, report_missing_in};
 use crate::table::{Align, Cell, Column, Layout, Overflow, Track, offset_within};
 use imprenta_core::diagnostic::Diagnostics;
 use imprenta_core::units::{Edges, Pt};
@@ -25,7 +25,10 @@ use std::collections::HashMap;
 /// An image supplied alongside the document.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageAsset {
-    pub bytes: Vec<u8>,
+    /// Shared rather than owned per node, so a logo on nine thousand pages is
+    /// one buffer. The writer keys its own decode cache on the address of
+    /// this, which only means anything if every node holds the same one.
+    pub bytes: std::sync::Arc<[u8]>,
     pub format: ImageFormat,
     /// Pixel dimensions, used to keep the aspect ratio when scaling.
     pub pixels: (u32, u32),
@@ -61,7 +64,7 @@ impl Assets {
         self.images.insert(
             name.into(),
             ImageAsset {
-                bytes,
+                bytes: bytes.into(),
                 format: info.format,
                 pixels: (info.width, info.height),
             },
@@ -140,11 +143,34 @@ pub fn build(
         },
     };
     let width = geometry.width - geometry.margin.horizontal();
+    // Built before the walk rather than at the end, because a page released
+    // part-way through the walk needs its header and footer just as much as
+    // the last one does.
+    let declared = crate::session::Bands {
+        header: document.header.clone(),
+        footer: document.footer.clone(),
+    };
+    let band = BandSpec {
+        bands: &declared,
+        names: &document.accumulators,
+        width,
+    };
 
-    let mut composer = Composer::with_options(geometry, fonts, options)?
+    let mut composer = Composer::with_options(geometry, fonts.clone(), options)?
         .with_accumulators(document.accumulators.len());
     if needs_total(document) {
-        composer = composer.holding_pages();
+        // A document that prints its own length is walked twice: once to
+        // count the pages with nothing painted, then again as a fragment that
+        // happens to be the whole of itself. The alternative — holding every
+        // painted page until the last one is packed — cost twenty-three times
+        // the memory on a ledger, and it is what made a long one trap.
+        //
+        // The second walk is what it costs, and it is cheaper than it sounds:
+        // the counting pass paints nothing, compresses nothing and builds no
+        // bands. Walking the IR twice is free either way, since an IR is
+        // inert data that is already in memory.
+        let total = count_pages(document, assets, geometry, &fonts, width, &mut shaper, band)?;
+        composer = composer.resuming(1, total, Vec::new());
     }
     let mut diagnostics = Diagnostics::default();
 
@@ -155,6 +181,7 @@ pub fn build(
             diagnostics: &mut diagnostics,
             composer: &mut composer,
             pending_break: None,
+            band,
         };
         for node in &document.children {
             ctx.node(node, width)?;
@@ -166,10 +193,7 @@ pub fn build(
         &mut shaper,
         assets,
         &mut diagnostics,
-        &crate::session::Bands {
-            header: document.header.clone(),
-            footer: document.footer.clone(),
-        },
+        &declared,
         &document.accumulators,
         width,
     )?;
@@ -179,6 +203,53 @@ pub fn build(
         pdf: composed.pdf,
         diagnostics: diagnostics.iter().map(|d| d.to_string()).collect(),
     })
+}
+
+/// How many pages a document runs to, having painted none of them.
+///
+/// The first of the two walks a `{{pages}}` document takes. It goes through
+/// the same [`Walk`] and the same packer a real render does, because a
+/// cheaper estimate would be a second paginator and the two would part
+/// company on exactly the documents that print their own length — a repeated
+/// table header is enough to do it, measured at 4 706 pages against a real
+/// 4 849.
+///
+/// Its diagnostics are thrown away rather than kept: every one of them will
+/// be reported again by the walk that paints, and a reader told twice that a
+/// font has no glyph for "日" would reasonably conclude there were two.
+fn count_pages(
+    document: &ir::Document,
+    assets: &Assets,
+    geometry: Geometry,
+    fonts: &Fonts,
+    width: Pt,
+    shaper: &mut Shaper,
+    band: BandSpec<'_>,
+) -> Result<usize, BuildError> {
+    // The shaper is the one the second pass will use. Sharing it is not for
+    // the cache — a ledger's rows are all different text and the hit rate on
+    // the second pass is nil — but because building a second one re-reads
+    // every font file for nothing.
+    let mut composer = Composer::with_options(geometry, fonts.clone(), Options::default())?
+        .with_accumulators(document.accumulators.len())
+        .counting();
+    let mut discarded = Diagnostics::default();
+    {
+        let mut ctx = Walk {
+            shaper,
+            assets,
+            diagnostics: &mut discarded,
+            composer: &mut composer,
+            pending_break: None,
+            // Never reached: a counting composer releases its pages without
+            // asking anybody what goes on them.
+            band,
+        };
+        for node in &document.children {
+            ctx.node(node, width)?;
+        }
+    }
+    Ok(composer.count())
 }
 
 /// Measures a run of table rows into the atoms the packer will see.
@@ -494,16 +565,18 @@ pub(crate) struct OpenTable {
 }
 
 impl Compose<'_> {
-    /// Turns declared runs into shaped ones, reporting anything the chosen
-    /// faces cannot draw. Both places that set text go through here so that
-    /// neither can quietly stop checking.
+    /// Turns declared runs into shaped ones.
+    ///
+    /// What the face could not draw is *not* asked here, though it reads as
+    /// the natural place for it. Asking here means shaping the text before it
+    /// is laid out, which is a second trip through the layout engine for
+    /// every paragraph in the document; the layout that follows knows the
+    /// answer already. See [`crate::shape::missing_in`].
     fn runs(&mut self, runs: &[ir::Run], style: ir::TextStyle) -> Vec<TextRun> {
         runs.iter()
             .map(|r| {
-                let face = face_of(r.weight, r.italic);
-                report_missing(self.shaper, &r.text, face, self.diagnostics);
                 TextRun::new(&r.text)
-                    .in_face(face)
+                    .in_face(face_of(r.weight, r.italic))
                     .inked(r.color.unwrap_or(style.color))
             })
             .collect()
@@ -515,7 +588,7 @@ impl Compose<'_> {
             .get(src)
             .ok_or_else(|| BuildError::UnknownAsset(src.to_string()))?;
         Ok(ImageContent::scaled_to_width(
-            asset.bytes.as_slice(),
+            std::sync::Arc::clone(&asset.bytes),
             asset.format,
             asset.pixels,
             width,
@@ -534,6 +607,7 @@ impl Compose<'_> {
                     .with_padding(Edges::bottom(text.style.space_after));
                 let track = Track { x: Pt(0.0), width };
                 let mut lines = self.shaper.break_rich(&shaped, text.style.size, width);
+                report_missing_in(&lines, self.diagnostics);
                 report_overflow(&lines, width, self.diagnostics);
                 justify(&mut lines, text.style.align, width);
                 for line in lines {
@@ -674,6 +748,39 @@ pub(crate) struct Compose<'a> {
     pub(crate) diagnostics: &'a mut Diagnostics,
 }
 
+/// What a page's bands are built from, small enough to be copied about.
+///
+/// Carried by the walk rather than produced only at the end, and that is the
+/// whole point of it. Pages are painted and dropped every few hundred atoms,
+/// and a page painted without this comes out with no header and no footer at
+/// all — a ledger of a thousand rows had a footer on one page of eighteen,
+/// silently, and every test written around a document short enough not to
+/// flush agreed that it was fine.
+#[derive(Clone, Copy)]
+pub(crate) struct BandSpec<'a> {
+    pub(crate) bands: &'a crate::session::Bands,
+    /// Names of the running totals, so a band can ask for one by name.
+    pub(crate) names: &'a [String],
+    /// The content width a band is laid out across.
+    pub(crate) width: Pt,
+}
+
+#[cfg(test)]
+impl BandSpec<'static> {
+    /// A document that declares neither a header nor a footer.
+    pub(crate) fn none(width: Pt) -> Self {
+        static NONE: crate::session::Bands = crate::session::Bands {
+            header: None,
+            footer: None,
+        };
+        Self {
+            bands: &NONE,
+            names: &[],
+            width,
+        }
+    }
+}
+
 /// State carried while walking the tree.
 pub(crate) struct Walk<'a> {
     pub(crate) shaper: &'a mut Shaper,
@@ -682,6 +789,7 @@ pub(crate) struct Walk<'a> {
     pub(crate) composer: &'a mut Composer,
     /// A break declared by a `PageBreak` node, applied to whatever comes next.
     pub(crate) pending_break: Option<Break>,
+    pub(crate) band: BandSpec<'a>,
 }
 
 /// How many atoms may pile up before finished pages are painted and dropped.
@@ -708,9 +816,35 @@ impl Walk<'_> {
         let index = self.composer.push(atom, content);
 
         if self.composer.pending() >= FLUSH_EVERY {
-            self.composer.flush();
+            self.flush();
         }
         index
+    }
+
+    /// Paints and drops every page that can no longer change, bands and all.
+    ///
+    /// Never `Composer::flush`, which paints no bands: a page released here
+    /// is finished, and there is no second visit to put a header on it later.
+    pub(crate) fn flush(&mut self) {
+        // Destructured so the borrow checker can see that the composer and
+        // the things a band is built from are different fields.
+        let Walk {
+            shaper,
+            assets,
+            diagnostics,
+            composer,
+            band,
+            ..
+        } = self;
+        let mut bands = BandAssets {
+            shaper,
+            assets,
+            diagnostics,
+            bands: band.bands,
+            names: band.names,
+            width: band.width,
+        };
+        composer.flush_with(&mut |page| bands.paint(page));
     }
 
     fn spacer(&mut self, height: Pt) {
@@ -767,6 +901,7 @@ impl Walk<'_> {
     fn text(&mut self, runs: &[ir::Run], style: ir::TextStyle, width: Pt) {
         let shaped = self.runs(runs, style);
         let mut lines = self.shaper.break_rich(&shaped, style.size, width);
+        report_missing_in(&lines, self.diagnostics);
         if lines.is_empty() {
             return;
         }
@@ -1901,6 +2036,7 @@ mod tests {
             diagnostics: &mut diagnostics,
             composer: &mut composer,
             pending_break: None,
+            band: BandSpec::none(Pt(515.0)),
         };
         for node in &long.children {
             walk.node(node, Pt(515.0)).unwrap();
@@ -1955,6 +2091,7 @@ mod tests {
             diagnostics: &mut diagnostics,
             composer: &mut composer,
             pending_break: None,
+            band: BandSpec::none(Pt(515.0)),
         };
 
         let height = |walk: &mut Walk, space: f32| {
@@ -2004,6 +2141,7 @@ mod tests {
             diagnostics: &mut diagnostics,
             composer: &mut composer,
             pending_break: None,
+            band: BandSpec::none(Pt(515.0)),
         };
 
         let panel = |space: f32| {
@@ -2660,6 +2798,63 @@ mod page_bands {
         assert!(text.starts_with("%PDF-"));
     }
 
+    /// How many text-showing operators a document contains.
+    ///
+    /// A proxy for "how much was drawn". Counted off an uncompressed file on
+    /// purpose: `TJ` is two bytes and a deflate stream is full of them, so
+    /// the same count taken over a compressed document is noise that happens
+    /// to look like a number.
+    fn runs(pdf: &[u8]) -> usize {
+        let text = String::from_utf8_lossy(pdf);
+        text.matches("Tj").count() + text.matches("TJ").count()
+    }
+
+    /// Readable output, so the operators above can actually be counted.
+    const READABLE: Options = Options { compress: false };
+
+    #[test]
+    fn a_band_survives_the_document_being_long_enough_to_flush() {
+        // The walk paints and drops finished pages as it goes, every 256
+        // atoms. It used to do that through the bandless `flush`, so every
+        // page released before the end came out with no header and no footer
+        // — a ledger of a thousand rows had three footers on eighteen pages,
+        // and the shorter documents the tests were written around never
+        // reached the flush at all.
+        //
+        // Counted rather than looked at: with one text run per cell, a footer
+        // on every page is exactly one more run per page than the same
+        // document without one.
+        let bare = build(&ledger(1_200, None, None), &assets(), READABLE).unwrap();
+        let footed = build(
+            &ledger(1_200, None, Some(band(20.0, "Pagina {{page}}"))),
+            &assets(),
+            READABLE,
+        )
+        .unwrap();
+
+        assert!(bare.pages > 10, "the sample must flush several times over");
+        assert_eq!(
+            runs(&footed.pdf) - runs(&bare.pdf),
+            footed.pages,
+            "{} pages carried a footer, of {}",
+            runs(&footed.pdf) - runs(&bare.pdf),
+            footed.pages
+        );
+    }
+
+    #[test]
+    fn a_header_band_survives_it_too() {
+        let bare = build(&ledger(1_200, None, None), &assets(), READABLE).unwrap();
+        let headed = build(
+            &ledger(1_200, Some(band(20.0, "Libro mayor")), None),
+            &assets(),
+            READABLE,
+        )
+        .unwrap();
+
+        assert_eq!(runs(&headed.pdf) - runs(&bare.pdf), headed.pages);
+    }
+
     #[test]
     fn a_footer_can_say_how_many_pages_there_are() {
         let built = build(
@@ -2671,6 +2866,104 @@ mod page_bands {
 
         assert!(built.pages > 2);
         assert!(built.diagnostics.is_empty(), "{:?}", built.diagnostics);
+    }
+
+    /// The document built the way it was before the counting pass existed:
+    /// every painted page held until the last one is packed.
+    ///
+    /// Written out here rather than kept behind a flag in `build`, because a
+    /// second production path is a second thing to keep working. What it is
+    /// for is the assertion below — that changing *when* the total is learnt
+    /// changed nothing about the file.
+    fn built_by_holding(document: &ir::Document) -> Vec<u8> {
+        let assets = assets();
+        let mut shaper = Shaper::with_faces(assets.fonts.iter().cloned());
+        let fonts = crate::render::Fonts::from_shaper(&shaper).unwrap();
+        let geometry = Geometry {
+            width: document.page.width,
+            height: document.page.height,
+            margin: document.page.margin,
+            bands: Bands {
+                header: document.header.as_ref().map_or(Pt(0.0), |b| b.height),
+                footer: document.footer.as_ref().map_or(Pt(0.0), |b| b.height),
+            },
+        };
+        let width = geometry.width - geometry.margin.horizontal();
+        let declared = crate::session::Bands {
+            header: document.header.clone(),
+            footer: document.footer.clone(),
+        };
+        let mut composer = Composer::with_options(geometry, fonts, Options::default())
+            .unwrap()
+            .with_accumulators(document.accumulators.len())
+            .holding_pages();
+        let mut diagnostics = Diagnostics::default();
+        {
+            let mut ctx = Walk {
+                shaper: &mut shaper,
+                assets: &assets,
+                diagnostics: &mut diagnostics,
+                composer: &mut composer,
+                pending_break: None,
+                band: BandSpec {
+                    bands: &declared,
+                    names: &document.accumulators,
+                    width,
+                },
+            };
+            for node in &document.children {
+                ctx.node(node, width).unwrap();
+            }
+        }
+        finish_with_bands(
+            composer,
+            &mut shaper,
+            &assets,
+            &mut diagnostics,
+            &declared,
+            &document.accumulators,
+            width,
+        )
+        .unwrap()
+        .pdf
+    }
+
+    #[test]
+    fn counting_the_pages_first_produces_the_file_holding_them_produced() {
+        // The only assertion that makes the counting pass safe to make. It
+        // paginates through the same packer, so it must land on the same page
+        // boundaries; it is told the total up front, so every footer must
+        // read the same; and it paints as it goes, so the pages must come out
+        // in the same order with the same content. Byte for byte is the only
+        // form of that claim worth testing — a page count and a file size
+        // would both survive a footer that had quietly gone blank.
+        let document = ledger(400, None, Some(band(20.0, "{{page}} de {{pages}}")));
+
+        let counted = build(&document, &assets(), Options::default()).unwrap();
+
+        assert!(counted.pages > 3, "the sample must paginate");
+        assert_eq!(counted.pdf, built_by_holding(&document));
+    }
+
+    #[test]
+    fn the_pass_that_counts_says_nothing_the_pass_that_paints_will_say_again() {
+        // Both walks measure the same text through the same shaper, so both
+        // notice the same missing glyph. Reported twice, a reader would
+        // reasonably conclude there were two of them.
+        let mut document = ledger(60, None, Some(band(20.0, "{{page}} de {{pages}}")));
+        let ir::Node::Table(table) = &mut document.children[0] else {
+            unreachable!()
+        };
+        table.rows[0].cells[0] = ir::Cell::new("日本語");
+
+        let built = build(&document, &assets(), Options::default()).unwrap();
+
+        let missing: Vec<_> = built
+            .diagnostics
+            .iter()
+            .filter(|d| d.contains("missing-glyph"))
+            .collect();
+        assert_eq!(missing.len(), 1, "{:?}", built.diagnostics);
     }
 
     #[test]

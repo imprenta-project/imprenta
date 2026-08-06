@@ -1,6 +1,6 @@
 [package]
-name = "imprenta-pdf"
-description = "The Imprenta PDF engine: measure, pack, paint."
+name = "imprenta-pdf-write"
+description = "Writes a PDF page by page, holding none of them."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,9 +10,9 @@ authors.workspace = true
 
 [dependencies]
 imprenta-core.workspace = true
-imprenta-pdf-write.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-parley.workspace = true
-rayon.workspace = true
 thiserror.workspace = true
+pdf-writer.workspace = true
+subsetter.workspace = true
+skrifa.workspace = true
+miniz_oxide.workspace = true
+png.workspace = true

@@ -63,6 +63,14 @@ helpers wraps it, which costs nothing because a `Buffer` *is* a `Uint8Array`.
 - **Release the result.** `collect()` calls `imprenta_out_release` as soon as it
   has read. WebAssembly memory never goes back to the host, so an instance that
   kept its last PDF would hold the largest one it ever made.
+- **And release the instance.** Releasing the PDF gives the module back its
+  bytes; it does not give the *host* back anything, because there is no
+  instruction to shrink a linear memory. An engine's footprint is the
+  high-water mark of the largest document it has ever rendered, for as long as
+  it lives, once per worker. `recycleAbove` — 64 MB by default — takes a fresh
+  instance once a document leaves one swollen, reusing the compiled module so
+  the warm-up is not paid again. Measured: 21.1 MB held after a 423-page
+  ledger, 2.6 MB with it.
 - **Fonts load once, at pool start.** Keyed by the assets, so a service with one
   family keeps one pool and never re-copies a typeface.
 - **One call in flight per document.** A `Printer` leases a worker and refuses a

@@ -4,9 +4,9 @@
 //! hand over `{ format: "png", width: 240, height: 80 }` — the file already
 //! says so, and a producer that gets it wrong squashes the logo silently.
 //!
-//! This reads headers only. Decoding pixels is krilla's job and happens once,
-//! at paint time; here we want the aspect ratio during measurement, which is
-//! the first eight bytes of an IHDR chunk or a JPEG frame header.
+//! This reads headers only. Decoding pixels is the writer's job and happens
+//! once, at paint time; here we want the aspect ratio during measurement,
+//! which is the first eight bytes of an IHDR chunk or a JPEG frame header.
 
 use crate::content::ImageFormat;
 

@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/imprenta-core",
     "crates/imprenta-pdf",
+    "crates/imprenta-pdf-write",
     "crates/imprenta-xlsx",
     "crates/imprenta-pdf-wasm",
     "crates/imprenta-xlsx-wasm",
@@ -20,6 +21,7 @@ authors = ["AbianS"]
 [workspace.dependencies]
 imprenta-core = { path = "crates/imprenta-core", version = "0.0.0" }
 imprenta-pdf = { path = "crates/imprenta-pdf", version = "0.0.0" }
+imprenta-pdf-write = { path = "crates/imprenta-pdf-write", version = "0.0.0" }
 imprenta-xlsx = { path = "crates/imprenta-xlsx", version = "0.0.0" }
 
 serde = { version = "1.0.229", features = ["derive"] }
@@ -27,8 +29,17 @@ serde_json = "1.0.151"
 thiserror = "2.0.19"
 
 parley = "0.6"
-krilla = { version = "0.7.0", features = ["rayon"] }
 rayon = "1.10"
+
+# What `imprenta-pdf-write` is built out of. `pdf-writer` and `subsetter` are
+# the two crates the writer this replaced sat on itself, so none of this is a
+# new risk — it is the same code with the layer that held every page until the
+# document closed taken off the top.
+pdf-writer = "0.14.0"
+subsetter = "0.2.6"
+skrifa = "0.44.0"
+miniz_oxide = "0.8.9"
+png = "0.17.16"
 
 [profile.release]
 opt-level = 3
