@@ -1,5 +1,7 @@
 # @imprentajs/pdf
 
+## 0.1.0-alpha.6
+
 ## 0.1.0-alpha.5
 
 ### Minor Changes
