@@ -9,6 +9,8 @@
     "@imprentajs/xlsx": "0.0.0"
   },
   "changesets": [
+    "a-border-colour-written-out",
+    "a-logo-in-a-spreadsheet",
     "aligned-paragraphs",
     "bands-on-every-released-page",
     "give-the-memory-back",
