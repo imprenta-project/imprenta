@@ -150,8 +150,12 @@ function apply(name: string, theme: Theme, out: Resolved): void {
       }
       return;
 
-    case utility === 'border':
-      border(name, suffix, written, theme, out);
+    // `border-b-[#11307D]` parses as the utility `border-b`, because a written
+    // value swallows everything after the last dash before the bracket. That
+    // is the way anybody writes it having seen `border-b-2`, so the side is
+    // taken off here rather than left to fall through to "not a utility".
+    case utility === 'border' || utility.startsWith('border-'):
+      border(name, utility.slice('border-'.length) || suffix, written, theme, out);
       return;
   }
 
@@ -177,6 +181,12 @@ function border(
   const HAIRLINE = pt(1 / 16);
 
   if (written !== undefined) {
+    // A side may have come with it — `border-b-[#11307D]` — and unlike the cell
+    // side a page can take any width, so a written one is still a width.
+    const named = SIDES[suffix as keyof typeof SIDES];
+    if (named) {
+      out.borderSides = [...(out.borderSides ?? []), named];
+    }
     if (written.startsWith('#')) {
       out.border = written;
     } else {

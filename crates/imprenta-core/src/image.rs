@@ -7,8 +7,23 @@
 //! This reads headers only. Decoding pixels is the writer's job and happens
 //! once, at paint time; here we want the aspect ratio during measurement,
 //! which is the first eight bytes of an IHDR chunk or a JPEG frame header.
+//!
+//! It lives in `core` because an image's own size is vocabulary, not model. A
+//! page scales a logo to a width and works the height out from the ratio; a
+//! sheet hangs one off a cell and needs the same ratio to give it an extent.
+//! Two readers of the same eight bytes would be two places for a JPEG with an
+//! EXIF segment in front of its frame header to be got wrong.
 
-use crate::content::ImageFormat;
+/// The two formats every consumer of an image can be relied on to read.
+///
+/// PNG and JPEG, and no others. Both are carried into a PDF without
+/// re-encoding and both go into a spreadsheet package as they arrived, so
+/// widening this is not a matter of adding a variant — it is a decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageFormat {
+    Png,
+    Jpeg,
+}
 
 /// What the bytes turned out to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

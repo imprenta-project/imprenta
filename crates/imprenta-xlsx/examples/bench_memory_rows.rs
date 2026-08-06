@@ -126,7 +126,9 @@ fn main() {
     let mut sheet = setup();
     sheet.rows.extend((0..rows).map(line));
     let book = Workbook::new(vec![sheet]);
-    let declared_bytes = imprenta_xlsx::write(&book).expect("it should write").len();
+    let declared_bytes = imprenta_xlsx::write(&book, &[])
+        .expect("it should write")
+        .len();
     let declared_time = started.elapsed();
     let declared_peak = peak_mb();
     drop(book);
@@ -134,7 +136,7 @@ fn main() {
     // Streamed: a batch at a time, and nothing else held.
     reset();
     let started = Instant::now();
-    let mut session = Session::open(Cursor::new(Vec::new()), vec![setup()]).expect("open");
+    let mut session = Session::open(Cursor::new(Vec::new()), vec![setup()], vec![]).expect("open");
     let mut at = 0;
     while at < rows {
         let upto = (at + batch).min(rows);

@@ -13,7 +13,8 @@ src/config.ts     imprenta.config.ts — bundled with esbuild, then imported
 src/documents.ts  finding documents, and PreviewProps
 src/preview.ts    the server: renders documents, serves the built UI
 src/build.ts      every document to a file, the same compile the preview uses
-src/checks.ts     the rules. Nine of them, plus whatever the engine reported
+src/checks.ts     the rules for a document. Nine, plus whatever the engine reported
+src/sheets.ts     the rules for a workbook. A different list, because the medium is
 vite.config.ts    builds app/ into app/dist. Never reached at the author's run time
 components.json   shadcn's config. Aliases point at app/src, not src
 app/              the preview UI (React, Tailwind, shadcn/ui on Base UI)
@@ -79,6 +80,12 @@ the second one to have happened, and says so if it has not.
   rule with no font list must not accuse every document of missing every face.
 - **Collapses.** Findings group by `rule + signature` with an `occurrences`
   count. The same fault in three hundred rows is one line saying three hundred.
+- **Runs before the write, if the engine would refuse it.** `missing-image` is
+  the first of these: the writer will not produce a workbook with a hole where
+  the logo was, so a rule checked afterwards can never fire — every workbook
+  that would trip it fails first, with the engine's own wording and no sheet
+  named. `refuse()` in `sheets.ts` holds the list, and it is one entry long
+  because a rule that stops a build has to be worth stopping it for.
 
 Engine diagnostics (`warning[code]: …`) are parsed into the same list, so the
 author reads one panel rather than two.

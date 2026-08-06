@@ -146,11 +146,7 @@ pub struct ImageContent {
     pub height: Pt,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImageFormat {
-    Png,
-    Jpeg,
-}
+pub use imprenta_core::image::ImageFormat;
 
 impl ImageContent {
     /// Sizes the image to `width`, keeping the aspect ratio of its pixels.

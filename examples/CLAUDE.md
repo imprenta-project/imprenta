@@ -25,5 +25,11 @@ pnpm --filter backend start       # an HTTP controller returning a PDF
 - **`mal-hecho.tsx` gets things wrong on purpose.** It is how the preview's
   rules are seen working. Every new rule in `@imprentajs/cli` adds a case to it,
   and the count in `README.md` moves with it.
+- **A rule the engine refuses to write past gets its own document.** Everything
+  in `mal-hecho` and `mal-hecha` still produces a file — that is the point, a
+  file somebody would use without noticing. `missing-image` produces nothing,
+  so putting it beside the others takes the whole workbook down and hides the
+  five faults that were the reason for it. `hojas/sin-imagen.tsx` is the first
+  of these and says so at the top.
 - Keep `informe.tsx` table-less. A document with no table in it is a real
   document and every early benchmark forgot that.

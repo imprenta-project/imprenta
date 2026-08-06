@@ -1,4 +1,4 @@
-import { Cell, Column, Row, Sheet, Workbook } from '@imprentajs/react/xlsx';
+import { Cell, Column, Image, Row, Sheet, Workbook } from '@imprentajs/react/xlsx';
 
 /**
  * A ledger with everything on it at once.
@@ -98,9 +98,15 @@ export default function LibroMayor({ rows }: Props) {
           <Column key={column.heading} width={column.width} format={column.format} />
         ))}
 
-        {/* A title across the whole width, which is what a merge is for. */}
+        {/* A title across the whole width, which is what a merge is for — and
+            the letterhead hangs off the same cell, pushed to the far end of
+            the block the merge makes. The picture floats over the grid, so the
+            cell keeps its text and the title reads as it did. */}
         <Row className="bg-slate-800 text-white font-bold text-lg align-middle" height={30}>
-          <Cell colSpan={COLUMNS.length}>Libro mayor · ejercicio 2026</Cell>
+          <Cell colSpan={COLUMNS.length}>
+            <Image src="logo" width={90} align="end" valign="center" />
+            Libro mayor · ejercicio 2026
+          </Cell>
         </Row>
         <Row className="bg-slate-100 text-slate-600 italic align-middle" height={18}>
           <Cell colSpan={COLUMNS.length}>

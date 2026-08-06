@@ -5,6 +5,7 @@ import type {
   IrCell,
   IrColumn,
   IrMerge,
+  IrPicture,
   IrRow,
   IrSheet,
   IrValue,
@@ -75,6 +76,7 @@ function toSheet(node: Instance, theme: Theme): IrSheet {
   const columns: IrColumn[] = [];
   const rows: IrRow[] = [];
   const merges: IrMerge[] = [];
+  const pictures: IrPicture[] = [];
 
   for (const child of node.children) {
     if (isText(child)) {
@@ -92,7 +94,7 @@ function toSheet(node: Instance, theme: Theme): IrSheet {
         columns.push(toColumn(child, theme));
         break;
       case 'row':
-        rows.push(toRow(child, rows.length, merges, theme));
+        rows.push(toRow(child, rows.length, merges, pictures, theme));
         break;
       default:
         throw new Error(
@@ -107,6 +109,7 @@ function toSheet(node: Instance, theme: Theme): IrSheet {
     ...(rows.length ? { rows } : {}),
     ...(merges.length ? { merges } : {}),
     ...(props.freeze ? { freeze: props.freeze } : {}),
+    ...(pictures.length ? { pictures } : {}),
   };
 }
 
@@ -119,7 +122,13 @@ function toColumn(node: Instance, theme: Theme): IrColumn {
   };
 }
 
-function toRow(node: Instance, at: number, merges: IrMerge[], theme: Theme): IrRow {
+function toRow(
+  node: Instance,
+  at: number,
+  merges: IrMerge[],
+  pictures: IrPicture[],
+  theme: Theme,
+): IrRow {
   const props = node.props as { height?: number; className?: string };
   const style = styleOf(props, theme);
   const cells: IrCell[] = [];
@@ -133,6 +142,14 @@ function toRow(node: Instance, at: number, merges: IrMerge[], theme: Theme): IrR
     }
 
     const column = cells.length;
+    // A picture is recorded on the sheet, which is where the format keeps it:
+    // it floats over the grid rather than sitting in the cell, and the cell
+    // it names stays blank.
+    for (const nested of child.children) {
+      if (!isText(nested) && nested.type === 'image') {
+        pictures.push(toPicture(nested, at, column));
+      }
+    }
     cells.push(toCell(child, theme));
 
     // A span is a merge, and a merge is recorded on the sheet rather than on
@@ -157,6 +174,37 @@ function toRow(node: Instance, at: number, merges: IrMerge[], theme: Theme): IrR
     ...(cells.length ? { cells } : {}),
     ...(props.height !== undefined ? { height: props.height } : {}),
     ...(style ? { style } : {}),
+  };
+}
+
+function toPicture(node: Instance, row: number, column: number): IrPicture {
+  const props = node.props as {
+    src?: unknown;
+    width?: unknown;
+    align?: IrPicture['align'];
+    valign?: IrPicture['valign'];
+    offset?: { x?: number; y?: number };
+  };
+
+  const src = String(props.src ?? '');
+  if (!src) {
+    throw new Error('an <Image> needs a src, which is the name its bytes were handed over under');
+  }
+  if (typeof props.width !== 'number' || !(props.width > 0)) {
+    throw new Error(`<Image src="${src}"> needs a width in points, and the height comes from it`);
+  }
+
+  const { x = 0, y = 0 } = props.offset ?? {};
+  return {
+    image: src,
+    row,
+    column,
+    ...(x ? { dx: x } : {}),
+    ...(y ? { dy: y } : {}),
+    width: props.width,
+    // `start` is the default on both sides, and absent is how the IR says so.
+    ...(props.align && props.align !== 'start' ? { align: props.align } : {}),
+    ...(props.valign && props.valign !== 'start' ? { valign: props.valign } : {}),
   };
 }
 
@@ -250,7 +298,10 @@ function flatten(children: HostNode[]): string {
   for (const child of children) {
     if (isText(child)) {
       out += child.text;
-    } else {
+    } else if (child.type !== 'image') {
+      // An image is the exception, and the only one: it hangs off the cell
+      // rather than going into it, so it has already been taken and what is
+      // left here is whatever text the author put beside it — usually none.
       throw new Error(`a <Cell> holds text, and this one has a <${child.type}> in it`);
     }
   }

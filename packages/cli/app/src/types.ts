@@ -62,6 +62,18 @@ export interface IrSheet {
   rows?: IrRow[];
   merges?: { fromRow: number; fromColumn: number; toRow: number; toColumn: number }[];
   freeze?: { rows?: number; columns?: number };
+  pictures?: IrPicture[];
+}
+
+export interface IrPicture {
+  image: string;
+  row: number;
+  column: number;
+  dx?: number;
+  dy?: number;
+  width: number;
+  align?: 'start' | 'center' | 'end';
+  valign?: 'start' | 'center' | 'end';
 }
 
 export interface IrRow {

@@ -90,6 +90,23 @@ describe('resolve', () => {
       expect(resolve('border-t border-b')).toMatchObject({ borderSides: ['top', 'bottom'] });
     });
 
+    it('colours one side with a colour written out', () => {
+      // A written value swallows everything up to the bracket, so this parses
+      // as the utility `border-b` and used to fall through to "not a utility
+      // this engine has" — which is true of the string and no use to somebody
+      // holding a brand colour. The cell side takes it; a page must too, or
+      // the same class means two things depending on what it is printed onto.
+      expect(resolve('border-b-[#11307D]')).toEqual({
+        border: '#11307D',
+        borderSides: ['bottom'],
+      });
+      expect(resolve('border-t-2 border-t-[#11307D]')).toEqual({
+        borderWidth: 1.5,
+        border: '#11307D',
+        borderSides: ['top', 'top'],
+      });
+    });
+
     it('takes a corner radius', () => {
       expect(resolve('rounded')).toEqual({ radius: 3 });
       expect(resolve('rounded-lg')).toEqual({ radius: 6 });

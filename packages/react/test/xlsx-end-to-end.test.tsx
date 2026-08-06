@@ -1,6 +1,6 @@
 import { write } from '@imprentajs/xlsx';
 import { describe, expect, it } from 'vitest';
-import { Cell, Column, Row, Sheet, Workbook } from '../src/xlsx/elements.js';
+import { Cell, Column, Image, Row, Sheet, Workbook } from '../src/xlsx/elements.js';
 import { render } from '../src/xlsx/render.js';
 
 /**
@@ -24,8 +24,11 @@ import { render } from '../src/xlsx/render.js';
  * survived the crossing — and a reader that normalises what it finds would
  * paper over exactly the failure being looked for.
  */
-async function through(element: React.ReactElement): Promise<{ bytes: Buffer }> {
-  const { xlsx } = await write(await render(element));
+async function through(
+  element: React.ReactElement,
+  images?: { name: string; data: Uint8Array }[],
+): Promise<{ bytes: Buffer }> {
+  const { xlsx } = await write(await render(element), images ? { images } : undefined);
   // The writer hands back a `Uint8Array`, because `Buffer` is Node-only and
   // the same module runs in a browser. The assertions below read XML out of
   // the package, which wants the string helpers `Buffer` has.
@@ -165,3 +168,39 @@ async function partOf(bytes: Buffer, name: string): Promise<string> {
     rmSync(path, { force: true });
   }
 }
+
+describe('a picture, all the way to the package', () => {
+  it('arrives anchored where the cell was, at the size that was asked for', async () => {
+    // The one test that can catch `ir.ts` and `ir.rs` disagreeing about a
+    // picture. serde drops a field it does not know without a word, so an
+    // anchor invented on this side arrives as `0, 0` and every unit test on
+    // both sides still passes.
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const logo = await readFile(
+      fileURLToPath(
+        new URL('../../../crates/imprenta-xlsx/tests/images/logo.png', import.meta.url),
+      ),
+    );
+
+    const { bytes } = await through(
+      <Workbook>
+        <Sheet name="Hoja">
+          <Row>
+            <Cell />
+            <Cell>
+              <Image src="logo" width={120} offset={{ x: 6 }} />
+            </Cell>
+          </Row>
+        </Sheet>
+      </Workbook>,
+      [{ name: 'logo', data: logo }],
+    );
+
+    const drawing = await partOf(bytes, 'xl/drawings/drawing1.xml');
+    expect(drawing).toContain('<xdr:col>1</xdr:col>');
+    expect(drawing).toContain('<xdr:colOff>76200</xdr:colOff>');
+    // 120 pt across, and the height from the logo's own 240×80 pixels.
+    expect(drawing).toContain('<xdr:ext cx="1524000" cy="508000"/>');
+  });
+});

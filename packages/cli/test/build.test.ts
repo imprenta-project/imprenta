@@ -165,6 +165,29 @@ describe('buildAll', () => {
     expect(existsSync(join(dir, 'out/bueno.pdf'))).toBe(true);
   }, 60_000);
 
+  it('names the sheet and the image when a picture has no image behind it', async () => {
+    // The engine refuses this write outright, and rightly — a workbook with a
+    // hole where the logo was is not worth producing. But its message names
+    // neither the sheet nor the document, so the rule has to be reached before
+    // the write is attempted or it can never fire at all: every workbook that
+    // would trip it fails first.
+    const dir = project({
+      'hoja.tsx': `
+        import { Cell, Image, Row, Sheet, Workbook } from '@imprentajs/react/xlsx';
+        export default () => (
+          <Workbook><Sheet name="Ventas"><Row>
+            <Cell><Image src="membrete" width={90} />Concepto</Cell>
+          </Row></Sheet></Workbook>
+        );
+      `,
+    });
+
+    const [done] = await buildAll(await loadConfig(dir), { out: join(dir, 'out') });
+
+    expect(done.error).toMatch(/Ventas/);
+    expect(done.error).toMatch(/membrete/);
+  }, 60_000);
+
   it('says which setting is missing when there are no fonts', async () => {
     const dir = project({ 'factura.tsx': hello('a') }, false);
 

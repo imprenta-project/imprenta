@@ -93,6 +93,45 @@ describe('borders, which Excel has three of', () => {
     expect(after.border).toEqual({ bottom: { style: 'thin', color: '#cad5e2' } });
   });
 
+  it('colours a border with a colour written out', () => {
+    // A brand colour is a hex nobody has a Tailwind name for, and `bg-[#…]`
+    // and `text-[#…]` both take one. A border that quietly ignored it — and
+    // reset the width it had been given on the way past — is the failure this
+    // project calls the worst kind: the sheet opens, the rule is there, and it
+    // is the wrong one.
+    expect(resolve('border-b-2 border-[#11307D]').border).toEqual({
+      bottom: { style: 'medium', color: '#11307D' },
+    });
+  });
+
+  it('refuses a width written out, because Excel has three', () => {
+    expect(() => resolve('border-[3pt]')).toThrow(/three — border \(thin\)/);
+  });
+
+  it('refuses a written-out width even when it lands on one Excel has', () => {
+    // `border-[2]` is not a colour, and it was becoming one: the width was
+    // read, thrown away, and the same text written into the border's colour —
+    // which then failed in the engine as a hex that would not parse. Landing
+    // on a width Excel happens to have cannot be what decides whether the
+    // class is honoured, or `border-[4]` works and `border-[3pt]` explains
+    // itself.
+    for (const name of ['border-[0]', 'border-[2]', 'border-[4]']) {
+      expect(() => resolve(name), name).toThrow(/three — border \(thin\)/);
+    }
+  });
+
+  it('colours one side with a colour written out', () => {
+    // The way anybody would write it, having seen `border-b-2`. It threw "not
+    // a utility a spreadsheet has", which is true of the string and useless to
+    // the author holding a brand colour.
+    expect(resolve('border-b-[#11307D]').border).toEqual({
+      bottom: { style: 'thin', color: '#11307D' },
+    });
+    expect(resolve('border-t-2 border-t-[#11307D]').border).toEqual({
+      top: { style: 'medium', color: '#11307D' },
+    });
+  });
+
   it('takes a border away for border-0', () => {
     expect(resolve('border border-0').border).toBeUndefined();
   });

@@ -18,6 +18,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use crate::ir::{Sheet, Workbook};
+use crate::picture::{Image, PictureError, Stored};
 use crate::session::Session;
 use crate::xml::escaped;
 
@@ -35,12 +36,21 @@ pub enum Error {
 
     #[error("all {declared} declared sheets have been written")]
     NoMoreSheets { declared: usize },
+
+    #[error(transparent)]
+    Picture(#[from] PictureError),
 }
 
 /// Writes a workbook and hands back the bytes.
-pub fn write(book: &Workbook) -> Result<Vec<u8>, Error> {
+///
+/// `images` are the bytes behind the names the sheets' pictures refer to. The
+/// IR carries a name and never an image, for the same reason the page engine
+/// does: a workbook can then be serialised, cached or put on a queue without
+/// dragging a logo along behind it. A workbook with no pictures takes an empty
+/// slice and produces exactly the package it always did.
+pub fn write(book: &Workbook, images: &[Image]) -> Result<Vec<u8>, Error> {
     let mut buffer = Cursor::new(Vec::new());
-    write_into(book, &mut buffer)?;
+    write_into(book, images, &mut buffer)?;
     Ok(buffer.into_inner())
 }
 
@@ -49,10 +59,14 @@ pub fn write(book: &Workbook) -> Result<Vec<u8>, Error> {
 /// Preferred for anything large, for the same reason `renderToFile` is on the
 /// PDF side: a hundred-megabyte export should never exist as a hundred
 /// megabytes in memory on its way to disk.
-pub fn write_to_file(book: &Workbook, path: impl AsRef<Path>) -> Result<u64, Error> {
+pub fn write_to_file(
+    book: &Workbook,
+    images: &[Image],
+    path: impl AsRef<Path>,
+) -> Result<u64, Error> {
     let file = File::create(path)?;
     let mut out = BufWriter::new(file);
-    write_into(book, &mut out)?;
+    write_into(book, images, &mut out)?;
     let file = out.into_inner().map_err(|e| Error::Io(e.into_error()))?;
     Ok(file.metadata()?.len())
 }
@@ -63,12 +77,12 @@ pub fn write_to_file(book: &Workbook, path: impl AsRef<Path>) -> Result<u64, Err
 /// drift: a file produced in one call and the same file produced in batches
 /// are the same bytes because they are the same code. The test that pins it
 /// is still worth having, as a guard against somebody separating them again.
-fn write_into<W: Write + Seek>(book: &Workbook, out: W) -> Result<(), Error> {
+fn write_into<W: Write + Seek>(book: &Workbook, images: &[Image], out: W) -> Result<(), Error> {
     if book.sheets.is_empty() {
         return Err(Error::Empty);
     }
 
-    let mut session = Session::open(out, book.sheets.clone())?;
+    let mut session = Session::open(out, book.sheets.clone(), images.to_vec())?;
     for _ in 1..book.sheets.len() {
         session.next_sheet()?;
     }
@@ -106,7 +120,10 @@ pub(crate) fn part<W: Write + Seek>(
 const DECLARATION: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#;
 
 /// Which part is what. A part missing from here is a workbook that will not open.
-pub(crate) fn content_types(sheets: usize) -> String {
+///
+/// `drawings` names the sheets — one-based — that have pictures on them, which
+/// is what decides whether there is a drawing part to declare at all.
+pub(crate) fn content_types(sheets: usize, drawings: &[usize], stored: &[Stored]) -> String {
     let mut xml = String::from(DECLARATION);
     xml.push_str(r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">"#);
     xml.push_str(
@@ -122,6 +139,28 @@ pub(crate) fn content_types(sheets: usize) -> String {
     for index in 1..=sheets {
         xml.push_str(&format!(
             r#"<Override PartName="/xl/worksheets/sheet{index}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>"#
+        ));
+    }
+    // An image is declared by its extension rather than part by part, which is
+    // what `Default` is for. Each one once: a second `Default` for the same
+    // extension is a package Excel refuses.
+    let mut extensions: Vec<&str> = Vec::new();
+    for image in stored {
+        let extension = image.extension();
+        if !extensions.contains(&extension) {
+            extensions.push(extension);
+            xml.push_str(&format!(
+                r#"<Default Extension="{extension}" ContentType="image/{}"/>"#,
+                match extension {
+                    "png" => "png",
+                    _ => "jpeg",
+                }
+            ));
+        }
+    }
+    for index in drawings {
+        xml.push_str(&format!(
+            r#"<Override PartName="/xl/drawings/drawing{index}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>"#
         ));
     }
     xml.push_str("</Types>");
@@ -186,6 +225,7 @@ pub(crate) fn workbook_rels(sheets: usize) -> String {
 mod tests {
     use super::*;
     use crate::ir::{Cell, Row, Sheet};
+    use crate::picture::Image;
 
     fn one_sheet() -> Workbook {
         Workbook::new(vec![Sheet::new(
@@ -196,7 +236,7 @@ mod tests {
 
     #[test]
     fn every_part_is_declared_in_the_content_types() {
-        let xml = content_types(2);
+        let xml = content_types(2, &[], &[]);
         assert!(xml.contains("/xl/workbook.xml"));
         assert!(xml.contains("/xl/styles.xml"));
         assert!(xml.contains("/xl/worksheets/sheet1.xml"));
@@ -247,13 +287,111 @@ mod tests {
         // Deterministic output is a design commitment, and a zip records a
         // modification time per entry. Left at "now", two runs a second apart
         // would differ and nothing downstream could be cached or diffed.
-        let book = one_sheet();
-        assert_eq!(write(&book).unwrap(), write(&book).unwrap());
+        let book = with_a_logo();
+        let images = [Image::new("logo", LOGO)];
+        assert_eq!(
+            write(&book, &images).unwrap(),
+            write(&book, &images).unwrap()
+        );
+    }
+
+    const LOGO: &[u8] = include_bytes!("../tests/images/logo.png");
+
+    fn with_a_logo() -> Workbook {
+        Workbook::new(vec![Sheet {
+            name: "Hoja".into(),
+            rows: vec![Row::new(vec![Cell::text("Hola")])],
+            pictures: vec![crate::ir::Picture {
+                image: "logo".into(),
+                row: 0,
+                column: 0,
+                dx: 0.0,
+                dy: 0.0,
+                width: 120.0,
+                ..crate::ir::Picture::default()
+            }],
+            ..Sheet::default()
+        }])
+    }
+
+    fn names_in(bytes: &[u8]) -> Vec<String> {
+        let zip = zip::ZipArchive::new(Cursor::new(bytes.to_vec())).expect("a zip we just wrote");
+        zip.file_names().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn a_picture_brings_the_four_parts_it_needs() {
+        // A drawing is four files away from the cell it hangs off, and Excel
+        // opens a repair dialog naming none of them if any one is missing.
+        let bytes = write(&with_a_logo(), &[Image::new("logo", LOGO)]).unwrap();
+        let names = names_in(&bytes);
+
+        for part in [
+            "xl/media/image1.png",
+            "xl/drawings/drawing1.xml",
+            "xl/drawings/_rels/drawing1.xml.rels",
+            "xl/worksheets/_rels/sheet1.xml.rels",
+        ] {
+            assert!(names.contains(&part.to_string()), "{part} is missing");
+        }
+    }
+
+    #[test]
+    fn the_worksheet_points_at_its_drawing_after_the_merges() {
+        // `<drawing>` comes last in the schema's order for a worksheet. Out of
+        // place it is well-formed XML, invalid OOXML, and a repair dialog.
+        let bytes = write(&with_a_logo(), &[Image::new("logo", LOGO)]).unwrap();
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(
+            &mut zip.by_name("xl/worksheets/sheet1.xml").unwrap(),
+            &mut xml,
+        )
+        .unwrap();
+
+        let drawing = xml.find("<drawing ").expect("the sheet names its drawing");
+        assert!(drawing > xml.find("</sheetData>").unwrap(), "{xml}");
+        // The relationship prefix has to be declared on the root, or the
+        // attribute names a namespace that is not there.
+        assert!(xml.contains("xmlns:r="), "{xml}");
+    }
+
+    #[test]
+    fn the_image_and_the_drawing_are_declared_in_the_content_types() {
+        let bytes = write(&with_a_logo(), &[Image::new("logo", LOGO)]).unwrap();
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("[Content_Types].xml").unwrap(), &mut xml)
+            .unwrap();
+
+        assert!(
+            xml.contains(r#"<Default Extension="png" ContentType="image/png"/>"#),
+            "{xml}"
+        );
+        assert!(xml.contains("/xl/drawings/drawing1.xml"), "{xml}");
+    }
+
+    #[test]
+    fn a_workbook_with_no_pictures_is_the_package_it_always_was() {
+        // The whole feature has to cost nothing to everyone not using it: no
+        // extra parts, no extra namespace, no extra content type.
+        let plain = write(&one_sheet(), &[]).unwrap();
+        let names = names_in(&plain);
+
+        assert_eq!(names.len(), 6, "{names:?}");
+        assert!(!names.iter().any(|n| n.contains("drawing")), "{names:?}");
+    }
+
+    #[test]
+    fn a_picture_naming_an_image_nobody_handed_over_stops_the_write() {
+        // Rather than a workbook with a hole where the logo was.
+        let why = write(&with_a_logo(), &[]).expect_err("no image was handed over");
+        assert!(matches!(why, Error::Picture(_)), "{why:?}");
     }
 
     #[test]
     fn the_package_holds_the_parts_excel_looks_for() {
-        let bytes = write(&one_sheet()).unwrap();
+        let bytes = write(&one_sheet(), &[]).unwrap();
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("a zip we just wrote");
         let names: Vec<_> = zip.file_names().map(str::to_string).collect();
 

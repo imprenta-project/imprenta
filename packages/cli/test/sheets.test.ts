@@ -261,3 +261,39 @@ describe('a formula that will not open', () => {
     }
   });
 });
+
+describe('a picture', () => {
+  const withPicture = (image: string) => ({
+    sheets: [
+      {
+        name: 'Libro mayor',
+        rows: [{ cells: [{ value: { t: 'text', v: 'Concepto' } }] }],
+        pictures: [{ image, row: 0, column: 0, width: 120 }],
+      },
+    ],
+  });
+
+  it('is flagged when it names an image the project has not got', () => {
+    // The engine refuses it too. Said here it comes from the preview with the
+    // sheet named, rather than as a write that failed.
+    const found = checkWorkbook(withPicture('membrete'), { images: ['logo'] });
+
+    expect(found.map((f) => f.rule)).toContain('missing-image');
+    expect(found[0].detail).toMatch(/Libro mayor.*membrete/);
+    // Every other rule on a sheet says which sheet in `where`, which is what
+    // the panel groups by. Without it this one sorts in under no heading.
+    expect(found[0].where).toBe('Libro mayor');
+  });
+
+  it('is left alone when the project has it', () => {
+    expect(
+      checkWorkbook(withPicture('logo'), { images: ['logo'] }).map((f) => f.rule),
+    ).not.toContain('missing-image');
+  });
+
+  it('says nothing when the caller does not know what the project has', () => {
+    // No `images` is not "no images": it is a caller with no list, and a rule
+    // that guessed would flag every picture in a workbook checked on its own.
+    expect(checkWorkbook(withPicture('logo')).map((f) => f.rule)).not.toContain('missing-image');
+  });
+});

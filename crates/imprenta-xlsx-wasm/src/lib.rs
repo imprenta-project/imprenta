@@ -25,10 +25,17 @@ use std::cell::RefCell;
 pub mod job;
 pub mod stream;
 
+use imprenta_xlsx::Image;
 use job::{JobError, Outcome};
 use stream::Book;
 
 thread_local! {
+    /// The images the sheets' pictures name, kept between writes.
+    ///
+    /// Held rather than passed with each workbook for the same reason the page
+    /// engine holds its fonts: a logo is the same logo on every export, and
+    /// pushing it through the boundary once a document is work for nothing.
+    static IMAGES: RefCell<Vec<Image>> = const { RefCell::new(Vec::new()) };
     /// The finished workbook, kept until the host has read it or released it.
     static OUT: RefCell<Outcome> = const {
         RefCell::new(Outcome { xlsx: Vec::new(), sheets: 0 })
@@ -88,6 +95,45 @@ unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     unsafe { std::slice::from_raw_parts(ptr, len) }
 }
 
+// ── The library ─────────────────────────────────────────────────────────────
+
+/// Forgets every image. A host reusing an instance for a different workbook
+/// calls this first.
+#[unsafe(no_mangle)]
+pub extern "C" fn imprenta_assets_reset() -> i32 {
+    IMAGES.with(|slot| slot.borrow_mut().clear());
+    succeed()
+}
+
+/// Adds an image the sheets refer to by name.
+///
+/// # Safety
+///
+/// Both pointers must point at their stated number of readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn imprenta_assets_image(
+    name_ptr: *const u8,
+    name_len: usize,
+    data_ptr: *const u8,
+    data_len: usize,
+) -> i32 {
+    let name = match std::str::from_utf8(unsafe { bytes(name_ptr, name_len) }) {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            return fail(JobError::Malformed(format!(
+                "the image name is not text: {e}"
+            )));
+        }
+    };
+    IMAGES.with(|slot| {
+        slot.borrow_mut().push(Image::new(
+            name,
+            unsafe { bytes(data_ptr, data_len) }.to_vec(),
+        ))
+    });
+    succeed()
+}
+
 // ── One workbook, declared whole ────────────────────────────────────────────
 
 /// Writes a declared workbook. Read the result with [`imprenta_out_ptr`].
@@ -97,7 +143,8 @@ unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
 /// `ir_ptr` must point at `ir_len` readable bytes of JSON.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn imprenta_write(ir_ptr: *const u8, ir_len: usize) -> i32 {
-    match job::run(unsafe { bytes(ir_ptr, ir_len) }) {
+    let result = IMAGES.with(|slot| job::run(unsafe { bytes(ir_ptr, ir_len) }, &slot.borrow()));
+    match result {
         Ok(outcome) => publish(outcome),
         Err(e) => fail(e),
     }
@@ -112,7 +159,8 @@ pub unsafe extern "C" fn imprenta_write(ir_ptr: *const u8, ir_len: usize) -> i32
 /// `ptr` must point at `len` readable bytes of JSON.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn imprenta_book_open(ptr: *const u8, len: usize) -> i32 {
-    match Book::open(unsafe { bytes(ptr, len) }) {
+    let opened = IMAGES.with(|slot| Book::open(unsafe { bytes(ptr, len) }, slot.borrow().clone()));
+    match opened {
         Ok(book) => {
             BOOK.with(|slot| *slot.borrow_mut() = Some(book));
             succeed()

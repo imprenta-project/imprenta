@@ -14,8 +14,8 @@
 
 use std::io::Cursor;
 
-use imprenta_xlsx::Session;
 use imprenta_xlsx::ir::{Merge, Row, Sheet};
+use imprenta_xlsx::{Image, Session};
 
 use crate::job::{JobError, Outcome};
 
@@ -39,11 +39,11 @@ impl Book {
     /// anything is written, because `[Content_Types].xml` names every sheet
     /// and the specification wants it first in the package. The rows are what
     /// streams.
-    pub fn open(sheets_json: &[u8]) -> Result<Self, JobError> {
+    pub fn open(sheets_json: &[u8], images: Vec<Image>) -> Result<Self, JobError> {
         let declared: Vec<Sheet> =
             serde_json::from_slice(sheets_json).map_err(|e| JobError::Malformed(e.to_string()))?;
         let sheets = declared.len();
-        let session = Session::open(Cursor::new(Vec::new()), declared)?;
+        let session = Session::open(Cursor::new(Vec::new()), declared, images)?;
         Ok(Self { session, sheets })
     }
 
@@ -106,7 +106,7 @@ mod tests {
 
     /// The same workbook fed in batches of `batch`.
     fn streamed(rows: usize, batch: usize) -> Outcome {
-        let mut book = Book::open(SHEETS).unwrap();
+        let mut book = Book::open(SHEETS, vec![]).unwrap();
         let mut sent = 0;
         while sent < rows {
             let take = batch.min(rows - sent);
@@ -123,7 +123,7 @@ mod tests {
         // The rule this crate is most likely to break silently: content fed in
         // chunks must be byte for byte what the same content declared whole
         // produces.
-        let whole = run(&declared(300)).unwrap();
+        let whole = run(&declared(300), &[]).unwrap();
 
         let fed = streamed(300, 50);
 
@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn a_second_sheet_is_opened_only_when_it_was_declared() {
-        let mut book = Book::open(br#"[{ "name": "Uno" }, { "name": "Dos" }]"#).unwrap();
+        let mut book = Book::open(br#"[{ "name": "Uno" }, { "name": "Dos" }]"#, vec![]).unwrap();
         book.rows(format!("[{}]", row(0)).as_bytes()).unwrap();
 
         book.next_sheet().unwrap();
@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn asking_for_a_sheet_that_was_never_declared_is_an_error() {
-        let mut book = Book::open(SHEETS).unwrap();
+        let mut book = Book::open(SHEETS, vec![]).unwrap();
 
         assert!(book.next_sheet().is_err());
     }
@@ -162,7 +162,7 @@ mod tests {
     fn the_open_sheet_says_how_far_down_it_is() {
         // What a caller needs to merge a total row: the merge is expressed in
         // absolute rows, not in rows since the last batch.
-        let mut book = Book::open(SHEETS).unwrap();
+        let mut book = Book::open(SHEETS, vec![]).unwrap();
 
         book.rows(format!("[{},{}]", row(0), row(1)).as_bytes())
             .unwrap();
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn a_malformed_batch_is_an_error_and_not_a_panic() {
-        let mut book = Book::open(SHEETS).unwrap();
+        let mut book = Book::open(SHEETS, vec![]).unwrap();
 
         let err = book.rows(b"[ not json").unwrap_err();
 
@@ -181,6 +181,6 @@ mod tests {
 
     #[test]
     fn a_workbook_with_no_sheets_says_so() {
-        assert!(Book::open(b"[]").is_err());
+        assert!(Book::open(b"[]", vec![]).is_err());
     }
 }

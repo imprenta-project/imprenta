@@ -53,6 +53,44 @@ export interface RowProps extends Styled {
   children?: ReactNode;
 }
 
+export interface ImageProps {
+  /**
+   * The name the bytes were handed over under.
+   *
+   * The image itself never travels in the workbook — `write(ir, { images })`
+   * takes the bytes — so a declared sheet can be serialised, cached or put on
+   * a queue without a logo stuck to it.
+   */
+  src: string;
+
+  /**
+   * How wide to draw it, in points.
+   *
+   * There is no height, and that is deliberate: the image's own pixels give
+   * the ratio. Asking for both is the one way to squash a logo, and it is
+   * always somebody copying the numbers off the last one.
+   */
+  width: number;
+
+  /**
+   * Where it sits inside the cell — or inside the merge that swallowed it.
+   *
+   * Centring cannot be worked out by whoever declares the sheet: it needs the
+   * picture's height, and the height comes from the image's own pixels, which
+   * only the engine has read. A producer that computed an offset itself would
+   * get it right for the logo in front of it and wrong for the next one,
+   * silently, because the picture is still on the page.
+   *
+   * Defaults to the top-left corner, which is where a picture goes if nobody
+   * says otherwise.
+   */
+  align?: 'start' | 'center' | 'end';
+  valign?: 'start' | 'center' | 'end';
+
+  /** A nudge from wherever it was placed, in points. */
+  offset?: { x?: number; y?: number };
+}
+
 export interface CellProps extends Styled {
   /**
    * What is in the cell, with its type.
@@ -119,5 +157,20 @@ export const Row = host<RowProps>('row');
 
 /** One cell: what is in it, what type it is, and how it is formatted. */
 export const Cell = host<CellProps>('cell');
+
+/**
+ * An image, hung off the cell it is written in.
+ *
+ * ```tsx
+ * <Cell><Image src="logo" width={120} /></Cell>
+ * ```
+ *
+ * Written inside a cell rather than declared beside the sheet with a row and
+ * a column. Coordinates would be a second thing to keep in step with the
+ * rows: insert a header above and the logo stays where it was, which is the
+ * bug the anchor exists to prevent. It floats over the grid rather than
+ * sitting in the cell, so the cell it names stays empty.
+ */
+export const Image = host<ImageProps>('image');
 
 export { Theme, type ThemeProps } from '../element.js';

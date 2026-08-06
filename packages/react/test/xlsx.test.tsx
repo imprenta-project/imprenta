@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Theme } from '../src/element.js';
-import { Cell, Column, Row, Sheet, Workbook } from '../src/xlsx/elements.js';
+import { Cell, Column, Image, Row, Sheet, Workbook } from '../src/xlsx/elements.js';
 import type { IrWorkbook } from '../src/xlsx/ir.js';
 import { toWorkbook } from '../src/xlsx/render.js';
 
@@ -329,5 +329,128 @@ describe('formatting', () => {
         </Workbook>,
       ),
     ).rejects.toThrow(/the rows could not be loaded/);
+  });
+});
+
+describe('a picture', () => {
+  it('hangs off the cell it is written in', async () => {
+    // Written inside the cell rather than declared with coordinates beside
+    // the sheet. A logo at `{ row: 0, column: 0 }` is a second place to keep
+    // in step with the rows, and inserting a header row above would leave it
+    // behind — which is exactly what the anchor exists to prevent.
+    const ir = await toWorkbook(
+      <Workbook>
+        <Sheet name="Hoja">
+          <Row>
+            <Cell>Concepto</Cell>
+          </Row>
+          <Row>
+            <Cell />
+            <Cell>
+              <Image src="logo" width={120} />
+            </Cell>
+          </Row>
+        </Sheet>
+      </Workbook>,
+    );
+
+    expect(ir.sheets[0].pictures).toEqual([{ image: 'logo', row: 1, column: 1, width: 120 }]);
+  });
+
+  it('leaves the cell it hangs from empty', async () => {
+    // The picture floats over the grid; the cell is only the anchor. Writing
+    // something into it would put a value where the author put an image.
+    const ir = await toWorkbook(
+      <Workbook>
+        <Sheet name="Hoja">
+          <Row>
+            <Cell>
+              <Image src="logo" width={60} />
+            </Cell>
+          </Row>
+        </Sheet>
+      </Workbook>,
+    );
+
+    expect(ir.sheets[0].rows?.[0].cells?.[0].value).toEqual({ t: 'blank' });
+  });
+
+  it('takes an offset into the cell, in points', async () => {
+    const ir = await toWorkbook(
+      <Workbook>
+        <Sheet name="Hoja">
+          <Row>
+            <Cell>
+              <Image src="logo" width={60} offset={{ x: 6, y: 3 }} />
+            </Cell>
+          </Row>
+        </Sheet>
+      </Workbook>,
+    );
+
+    expect(ir.sheets[0].pictures?.[0]).toMatchObject({ dx: 6, dy: 3 });
+  });
+
+  it('has no height to give it, because the image has one', async () => {
+    // The same rule as `<Image width>` on a page. Asking for both is the one
+    // way to squash a logo, and it is always somebody copying numbers.
+    const ir = await toWorkbook(
+      <Workbook>
+        <Sheet name="Hoja">
+          <Row>
+            <Cell>
+              <Image src="logo" width={60} />
+            </Cell>
+          </Row>
+        </Sheet>
+      </Workbook>,
+    );
+
+    expect(ir.sheets[0].pictures?.[0]).not.toHaveProperty('height');
+  });
+
+  it('is refused outside a cell, where it would have nothing to hang from', async () => {
+    await expect(
+      toWorkbook(
+        <Workbook>
+          <Sheet name="Hoja">
+            <Image src="logo" width={60} />
+          </Sheet>
+        </Workbook>,
+      ),
+    ).rejects.toThrow(/<image>/);
+  });
+});
+
+describe('placing a picture', () => {
+  const placed = async (props: Record<string, unknown>) =>
+    (
+      await toWorkbook(
+        <Workbook>
+          <Sheet name="Hoja">
+            <Row>
+              <Cell>
+                <Image src="logo" width={60} {...props} />
+              </Cell>
+            </Row>
+          </Sheet>
+        </Workbook>,
+      )
+    ).sheets[0].pictures?.[0];
+
+  it('carries where it should sit, and leaves the engine to work out where that is', async () => {
+    // The React side cannot centre anything: it has never seen the image, so
+    // it does not know how tall the picture is. All it can do is say so.
+    expect(await placed({ align: 'center', valign: 'center' })).toMatchObject({
+      align: 'center',
+      valign: 'center',
+    });
+  });
+
+  it('says nothing when it goes where a picture goes anyway', async () => {
+    // Absent is the corner. A field written out on every picture would make
+    // every sheet already declared produce a different IR for no change.
+    expect(await placed({})).not.toHaveProperty('align');
+    expect(await placed({ align: 'start' })).not.toHaveProperty('align');
   });
 });

@@ -12,13 +12,46 @@
 import { asWrite, type WriteOptions, type WriteResult, writers } from './index.js';
 import type { Job, Lease } from './pool.js';
 
-/** A sheet as it will appear, before any rows have been fed to it. */
+/**
+ * A sheet as it will appear, before any rows have been fed to it.
+ *
+ * Spelled out here rather than reusing `writer.ts`'s, which takes `unknown[]`
+ * for everything because it hands the JSON straight to the module. This is the
+ * shape a caller reads, so it says what is in a sheet — and the two have to
+ * gain a field together, or the typed one quietly refuses what the engine
+ * accepts.
+ */
 export interface SheetSetup {
   name: string;
   columns?: { width?: number; style?: unknown }[];
   rows?: unknown[];
   merges?: MergeRange[];
   freeze?: { rows?: number; columns?: number };
+  /**
+   * The pictures on the sheet.
+   *
+   * Declared with the sheet rather than fed with the rows: a picture is
+   * anchored to a cell, so it is known as soon as the sheet is, and the drawing
+   * is not written until the workbook closes. The bytes behind `image` go to
+   * `new Book(sheets, { images })`.
+   */
+  pictures?: PictureAnchor[];
+}
+
+/** An image hung off a cell. Zero-based, as merges are. */
+export interface PictureAnchor {
+  /** The name the bytes were handed over under. */
+  image: string;
+  row: number;
+  column: number;
+  /** In points. The height comes from the image's own pixels. */
+  width: number;
+  /** A nudge from wherever it was placed, in points. */
+  dx?: number;
+  dy?: number;
+  /** Where it sits in the block it hangs from. Absent means the corner. */
+  align?: 'start' | 'center' | 'end';
+  valign?: 'start' | 'center' | 'end';
 }
 
 /** Zero-based, both ends included. */
@@ -69,7 +102,11 @@ export class Book {
       const pool = await writers(options);
       const lease = await pool.lease();
       try {
-        await lease.send({ op: 'open', sheets: declared });
+        // The images go with the sheets, because the module is asked for them
+        // once when the workbook opens and the drawing is written when it
+        // closes. Left out, a picture on a declared sheet came back as the
+        // engine saying the image had never been handed over.
+        await lease.send({ op: 'open', sheets: declared, images: options.images });
         this.lease = lease;
       } catch (error) {
         // A workbook that never opened must not sit on a writer.

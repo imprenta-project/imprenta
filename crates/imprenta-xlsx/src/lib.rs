@@ -12,6 +12,7 @@
 
 pub mod ir;
 mod package;
+pub mod picture;
 pub mod serial;
 pub mod session;
 mod sheet;
@@ -19,4 +20,5 @@ pub mod style;
 mod xml;
 
 pub use package::{Error, write, write_to_file};
+pub use picture::{Image, PictureError};
 pub use session::Session;

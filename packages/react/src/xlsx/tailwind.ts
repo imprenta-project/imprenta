@@ -186,8 +186,12 @@ function apply(name: string, theme: Theme, work: Work): void {
       out.fill = written?.startsWith('#') === true ? written : color(suffix ?? '', name, theme);
       return;
 
-    case utility === 'border':
-      border(name, suffix ?? '', theme, work);
+    // `border-b-[#11307D]` parses as the utility `border-b`, because a written
+    // value swallows everything after the last dash before the bracket. That
+    // is the way anybody writes it having seen `border-b-2`, so the side is
+    // taken off here rather than left to fall through to "not a utility".
+    case utility === 'border' || utility.startsWith('border-'):
+      border(name, utility.slice('border-'.length) || (suffix ?? ''), written, theme, work);
       return;
   }
 
@@ -195,11 +199,38 @@ function apply(name: string, theme: Theme, work: Work): void {
 }
 
 /** A width, a colour, a side or a line style, told apart by the suffix. */
-function border(name: string, key: string, theme: Theme, work: Work): void {
+function border(
+  name: string,
+  key: string,
+  written: string | undefined,
+  theme: Theme,
+  work: Work,
+): void {
   work.bordered = true;
 
   const [head, ...rest] = key.split('-');
   const side = SIDES[head];
+
+  // `border-[#11307D]`, and `border-b-[#11307D]` for one side. A brand colour
+  // is a hex nobody has a name for, and the other two places a colour is taken
+  // — `bg-[#…]`, `text-[#…]` — both accept one written out.
+  //
+  // A width written out is refused whatever it says, including `border-[2]`,
+  // which does land on a width Excel has. Honouring the ones that happen to
+  // land would make the class work or not depending on the number in it, and
+  // the number is the thing the author was guessing at. There are three
+  // widths and they have names.
+  if (written !== undefined) {
+    if (!written.startsWith('#')) {
+      throw new Error(TOO_MANY_WIDTHS(name));
+    }
+    if (side && head !== '') {
+      work.sides.add(side);
+    }
+    work.borderColor = written;
+    return;
+  }
+
   if (side && head !== '') {
     work.sides.add(side);
     const width = rest.join('-');
@@ -223,12 +254,17 @@ function border(name: string, key: string, theme: Theme, work: Work): void {
   work.borderColor = color(key, name, theme);
 }
 
+/**
+ * One message, so a width refused for landing nowhere and a width refused for
+ * being written out both name the three that exist.
+ */
+const TOO_MANY_WIDTHS = (name: string) =>
+  `"${name}" is a width Excel does not have: it has three — border (thin), border-2 (medium) and border-4 (thick)`;
+
 function widthOf(width: string, name: string, work: Work): Line | undefined {
   const found = WIDTHS[width];
   if (found === undefined) {
-    throw new Error(
-      `"${name}" is a width Excel does not have: it has three — border (thin), border-2 (medium) and border-4 (thick)`,
-    );
+    throw new Error(TOO_MANY_WIDTHS(name));
   }
   if (found === 'none') {
     // `border-0` takes the border away rather than drawing a nought-wide one.

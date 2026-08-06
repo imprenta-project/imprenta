@@ -14,8 +14,9 @@
  * browser — reach for {@link Writer} instead and skip the hop.
  */
 import { Pool, type PoolOptions } from './pool.js';
+import type { Image } from './writer.js';
 
-export type { SheetSetup, WriteOutcome, WriterOptions } from './writer.js';
+export type { Image, SheetSetup, WriteOutcome, WriterOptions } from './writer.js';
 export { EngineError, SyncBook, Writer } from './writer.js';
 
 export interface WriteResult {
@@ -32,7 +33,16 @@ export interface FileResult {
   sheets: number;
 }
 
-export interface WriteOptions extends PoolOptions {}
+export interface WriteOptions extends PoolOptions {
+  /**
+   * The bytes behind the names the sheets' pictures use.
+   *
+   * Given per workbook rather than per pool: a pool is warm across callers,
+   * and a logo belongs to the export rather than to the writer that happened
+   * to take it.
+   */
+  images?: Image[];
+}
 
 /**
  * One pool, started on the first call.
@@ -56,7 +66,7 @@ function writers(options: WriteOptions = {}): Promise<Pool> {
 
 /** Writes a declared workbook and hands back the bytes. */
 export async function write(ir: string, options?: WriteOptions): Promise<WriteResult> {
-  const reply = await (await writers(options)).run({ op: 'write', ir });
+  const reply = await (await writers(options)).run({ op: 'write', ir, images: options?.images });
   return asWrite(reply);
 }
 
@@ -71,7 +81,12 @@ export async function writeToFile(
   path: string,
   options?: WriteOptions,
 ): Promise<FileResult> {
-  const reply = await (await writers(options)).run({ op: 'writeToFile', ir, path });
+  const reply = await (await writers(options)).run({
+    op: 'writeToFile',
+    ir,
+    path,
+    images: options?.images,
+  });
   return {
     path: reply.path as string,
     bytes: reply.bytes as number,

@@ -47,6 +47,147 @@ pub struct Sheet {
     /// Rows and columns held still while the rest scrolls.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub freeze: Option<Freeze>,
+    /// Images floating over the grid, each hung off a cell.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pictures: Vec<Picture>,
+}
+
+/// An image hung off a cell.
+///
+/// The only thing in a workbook that is not a value in the grid. It sits over
+/// the sheet rather than in it, anchored to a cell so that inserting a row
+/// above carries it down, and it is the one measurement here in points —
+/// everything else is characters or row height.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Picture {
+    /// The name the bytes were handed over under. The IR carries the name and
+    /// never the image, so a workbook can be serialised, cached or put on a
+    /// queue without dragging a logo behind it.
+    pub image: String,
+    /// The cell its top-left corner hangs from. Zero-based, as merges are.
+    pub row: u32,
+    pub column: u32,
+    /// How far into that cell to start, in points.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub dx: f64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub dy: f64,
+    /// How wide to draw it, in points. The height comes from the image's own
+    /// pixels — there is no way to ask for one, because asking for both is
+    /// how a logo gets squashed.
+    pub width: f64,
+
+    /// Where it sits inside the block it hangs from.
+    ///
+    /// Centring is the engine's job and cannot be the author's: it needs the
+    /// height, and the height comes from the image's own pixels, which only
+    /// the engine has read. A producer that worked out an offset itself would
+    /// get it right for the logo it had in front of it and wrong for the next
+    /// one — silently, because the picture is still on the page.
+    #[serde(skip_serializing_if = "Placement::is_start")]
+    pub align: Placement,
+    #[serde(skip_serializing_if = "Placement::is_start")]
+    pub valign: Placement,
+}
+
+/// Where a picture sits along one axis of the block it hangs from.
+///
+/// One enum for both axes because the three positions are the same three, and
+/// naming them `left/center/right` and `top/middle/bottom` would be two words
+/// for every idea and a conversion between them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Placement {
+    /// Against the top-left corner, where a picture goes if nobody says.
+    #[default]
+    Start,
+    Center,
+    End,
+}
+
+impl Placement {
+    pub fn is_start(&self) -> bool {
+        matches!(self, Placement::Start)
+    }
+
+    /// How far in, given how much room there is and how much is taken.
+    pub(crate) fn offset(self, room: f64, taken: f64) -> f64 {
+        match self {
+            Placement::Start => 0.0,
+            Placement::Center => (room - taken) / 2.0,
+            Placement::End => room - taken,
+        }
+        // A picture wider than the block it hangs from would otherwise be
+        // pushed off the left edge of the sheet, where it cannot be seen or
+        // dragged back.
+        .max(0.0)
+    }
+}
+
+/// Excel's own width unit, in points.
+///
+/// A column is measured in characters — the width of a `0` in the body font —
+/// and everything else in this file is a length. The conversion is Excel's:
+/// seven pixels a character plus five for the cell's own padding, at 96 dpi.
+pub(crate) fn column_points(chars: f64) -> f64 {
+    (chars * 7.0 + 5.0) * 0.75
+}
+
+/// What Excel makes a column that nobody described: 8.43 characters.
+pub(crate) const DEFAULT_COLUMN: f64 = 8.43;
+
+/// What Excel makes a row that nobody described, in points.
+pub(crate) const DEFAULT_ROW: f64 = 15.0;
+
+impl Sheet {
+    /// How wide the columns `from..=to` are, in points.
+    pub(crate) fn columns_points(&self, from: u32, to: u32) -> f64 {
+        (from..=to)
+            .map(|at| {
+                column_points(
+                    self.columns
+                        .get(at as usize)
+                        .and_then(|column| column.width)
+                        .unwrap_or(DEFAULT_COLUMN),
+                )
+            })
+            .sum()
+    }
+
+    /// How tall the rows `from..=to` are, in points.
+    pub(crate) fn rows_points(&self, from: u32, to: u32) -> f64 {
+        (from..=to)
+            .map(|at| {
+                self.rows
+                    .get(at as usize)
+                    .and_then(|row| row.height)
+                    .unwrap_or(DEFAULT_ROW)
+            })
+            .sum()
+    }
+
+    /// The block a cell belongs to: itself, or the merge that swallowed it.
+    ///
+    /// A logo hangs off `A1` and the author combined `A1:B4` to make room for
+    /// it. Centring in `A1` alone would put it in the top-left corner of the
+    /// block the eye actually sees.
+    pub(crate) fn block(&self, row: u32, column: u32) -> (u32, u32, u32, u32) {
+        self.merges
+            .iter()
+            .find(|m| {
+                m.from_row <= row
+                    && row <= m.to_row
+                    && m.from_column <= column
+                    && column <= m.to_column
+            })
+            .map(|m| (m.from_row, m.from_column, m.to_row, m.to_column))
+            .unwrap_or((row, column, row, column))
+    }
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
 }
 
 impl Sheet {

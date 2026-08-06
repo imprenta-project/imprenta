@@ -17,7 +17,7 @@ use std::io::Cursor;
 
 /// Writes a workbook and reads it back with calamine.
 fn round_trip(book: &Workbook) -> calamine::Xlsx<Cursor<Vec<u8>>> {
-    let bytes = write(book).expect("a workbook we built ourselves should write");
+    let bytes = write(book, &[]).expect("a workbook we built ourselves should write");
     calamine::open_workbook_from_rs(Cursor::new(bytes)).expect("calamine should open it")
 }
 
@@ -337,5 +337,49 @@ fn text_that_would_break_the_xml_survives_it() {
     assert_eq!(
         range.get_value((0, 0)),
         Some(&Data::String(awkward.to_string()))
+    );
+}
+
+#[test]
+fn a_picture_survives_a_round_trip_through_the_package() {
+    // calamine does not read drawings, so this asserts the package rather
+    // than the picture: the parts are there, the relationships tie up, and
+    // the sheet still reads. `test/picture.test.ts` puts the same file past
+    // a reader that does look at drawings.
+    use imprenta_xlsx::Image;
+    use imprenta_xlsx::ir::Picture;
+
+    const LOGO: &[u8] = include_bytes!("images/logo.png");
+
+    let book = Workbook::new(vec![Sheet {
+        name: "Con logo".into(),
+        rows: vec![Row::new(vec![Cell::text("Concepto"), Cell::number(1200.0)])],
+        pictures: vec![Picture {
+            image: "logo".into(),
+            row: 0,
+            column: 0,
+            dx: 0.0,
+            dy: 0.0,
+            width: 120.0,
+            ..Picture::default()
+        }],
+        ..Sheet::default()
+    }]);
+
+    // Nothing is written to disk. A file to open by hand comes from
+    // `cargo run -p imprenta-xlsx --example ventas --release`, which is where
+    // the preview folder is built and where somebody looking for one will
+    // look; a test that scatters artefacts through the repo as a side effect
+    // is a test that has to be run to be understood.
+    let bytes = write(&book, &[Image::new("logo", LOGO)]).expect("it should write");
+
+    let mut read: calamine::Xlsx<Cursor<Vec<u8>>> =
+        calamine::open_workbook_from_rs(Cursor::new(bytes)).expect("calamine should open it");
+    let sheet = read
+        .worksheet_range("Con logo")
+        .expect("the sheet is there");
+    assert_eq!(
+        sheet.get_value((0, 0)),
+        Some(&calamine::Data::String("Concepto".into()))
     );
 }

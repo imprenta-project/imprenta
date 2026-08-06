@@ -10,6 +10,7 @@
  * decision about how many of these there are lives in `pool.ts`.
  */
 import { parentPort, workerData } from 'node:worker_threads';
+import type { Image } from './writer.js';
 import { type SyncBook, Writer } from './writer.js';
 
 export interface BootData {
@@ -18,9 +19,9 @@ export interface BootData {
 
 /** Everything the pool can ask for. One message, one reply, always. */
 export type Request =
-  | { id: number; op: 'write'; ir: string }
-  | { id: number; op: 'writeToFile'; ir: string; path: string }
-  | { id: number; op: 'open'; sheets: string }
+  | { id: number; op: 'write'; ir: string; images?: Image[] }
+  | { id: number; op: 'writeToFile'; ir: string; path: string; images?: Image[] }
+  | { id: number; op: 'open'; sheets: string; images?: Image[] }
   | { id: number; op: 'rows'; json: string }
   | { id: number; op: 'merge'; json: string }
   | { id: number; op: 'nextSheet' }
@@ -53,10 +54,10 @@ async function main(): Promise<void> {
     try {
       switch (request.op) {
         case 'write':
-          sendBytes(request.id, writer.write(request.ir));
+          sendBytes(request.id, writer.write(request.ir, request.images));
           return;
         case 'writeToFile': {
-          const out = writer.write(request.ir);
+          const out = writer.write(request.ir, request.images);
           await toFile(out.xlsx, request.path);
           port.postMessage({
             id: request.id,
@@ -67,7 +68,7 @@ async function main(): Promise<void> {
           return;
         }
         case 'open':
-          book = writer.book(JSON.parse(request.sheets));
+          book = writer.book(JSON.parse(request.sheets), request.images);
           port.postMessage({ id: request.id, ok: true });
           return;
         case 'rows':

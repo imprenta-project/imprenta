@@ -12,13 +12,13 @@ use crate::content::{
     BoxContent, CanvasContent, Content, ImageContent, ImageFormat, LinkContent, PathOp,
 };
 use crate::decoration::{BorderSide, Decoration};
-use crate::image::{ImageError, identify};
 use crate::ir;
 use crate::list::{List, Marker};
 use crate::render::{Bands, Fonts, Geometry, Options, RenderError};
 use crate::shape::{Face, Shaper, TextRun, Weight, report_missing_in};
 use crate::table::{Align, Cell, Column, Layout, Overflow, Track, offset_within};
 use imprenta_core::diagnostic::Diagnostics;
+use imprenta_core::image::{ImageError, identify};
 use imprenta_core::units::{Edges, Pt};
 use std::collections::HashMap;
 

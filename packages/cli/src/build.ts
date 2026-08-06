@@ -4,7 +4,7 @@ import { createServer } from 'vite';
 import { type Context, check, type Finding } from './checks.js';
 import type { Loaded } from './config.js';
 import { findDocuments, previewProps } from './documents.js';
-import { checkWorkbook } from './sheets.js';
+import { checkWorkbook, refuse } from './sheets.js';
 
 export interface BuildOptions {
   /** Where the files go. */
@@ -181,8 +181,16 @@ async function one(
   await mkdir(dirname(path), { recursive: true });
 
   if (rendered.format === 'xlsx') {
+    // The document rules are not the sheet rules: run them on a workbook
+    // and `empty-document` fires on every one, because a workbook has no
+    // children. A panel that says nonsense is worse than no panel.
+    const checks = checkWorkbook(rendered.ir, { images: assets.images.map((i) => i.name) });
+    refuse(checks);
+
     const { write } = await import('@imprentajs/xlsx');
-    const built = await write(JSON.stringify(rendered.ir));
+    // The same images the page side gets. A sheet's picture names one, and
+    // the CLI is the only thing that knows where the project keeps it.
+    const built = await write(JSON.stringify(rendered.ir), { images: assets.images });
     await writeFile(path, built.xlsx);
 
     return {
@@ -194,10 +202,7 @@ async function one(
       // The writer reports nothing: a spreadsheet has no clipped cell or
       // missing glyph to notice, because nothing is laid out here.
       diagnostics: [],
-      // The document rules are not the sheet rules: run them on a workbook
-      // and `empty-document` fires on every one, because a workbook has no
-      // children. A panel that says nonsense is worse than no panel.
-      checks: checkWorkbook(rendered.ir),
+      checks,
     };
   }
 

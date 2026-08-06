@@ -17,7 +17,33 @@ export interface IrSheet {
   rows?: IrRow[];
   merges?: IrMerge[];
   freeze?: IrFreeze;
+  pictures?: IrPicture[];
 }
+
+/**
+ * An image floating over the grid, anchored to a cell.
+ *
+ * Recorded on the sheet rather than in the cell, which is where the format
+ * keeps it: a picture is not a value, and a reader looking for one in that
+ * cell finds nothing there.
+ */
+export interface IrPicture {
+  /** The name the bytes were handed over under. */
+  image: string;
+  /** Zero-based, as merges are. */
+  row: number;
+  column: number;
+  /** A nudge from wherever it was placed, in points. */
+  dx?: number;
+  dy?: number;
+  /** In points. The height comes from the image's own pixels. */
+  width: number;
+  /** Where it sits in the block it hangs from. Absent means the corner. */
+  align?: Placement;
+  valign?: Placement;
+}
+
+export type Placement = 'start' | 'center' | 'end';
 
 export interface IrColumn {
   /** In Excel's own unit: about the width of one digit of the body font. */

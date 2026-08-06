@@ -20,6 +20,18 @@ export interface WriterOptions {
   wasm?: WasmSource;
 }
 
+/**
+ * An image a sheet's pictures name, as bytes.
+ *
+ * Handed over beside the workbook rather than inside it. The IR carries the
+ * name and nothing else — thirty-odd bytes — so a workbook can be serialised,
+ * cached or put on a queue without a logo stuck to it.
+ */
+export interface Image {
+  name: string;
+  data: Uint8Array;
+}
+
 export interface WriteOutcome {
   xlsx: Uint8Array;
   /** Size of the workbook in bytes. */
@@ -33,6 +45,15 @@ export interface SheetSetup {
   columns?: unknown[];
   freeze?: unknown;
   rows?: unknown[];
+  /**
+   * The pictures on the sheet, which are declared here with everything else
+   * about it rather than fed with the rows.
+   *
+   * A picture is anchored to a cell, so it is known as soon as the sheet is —
+   * and the drawing is written when the workbook closes, which is what lets a
+   * letterhead sit on a sheet whose rows have not arrived yet.
+   */
+  pictures?: unknown[];
 }
 
 export class Writer {
@@ -53,7 +74,8 @@ export class Writer {
    * The workbook crosses as JSON — the same shape the engine has always taken,
    * and what comes back from a file, a queue or an HTTP body.
    */
-  write(ir: string | Uint8Array): WriteOutcome {
+  write(ir: string | Uint8Array, images: Image[] = []): WriteOutcome {
+    this.load(images);
     const input = typeof ir === 'string' ? this.memory.writeText(ir) : this.memory.write(ir);
     try {
       check(this.e, this.memory, this.e.imprenta_write(input[0], input[1]));
@@ -64,7 +86,8 @@ export class Writer {
   }
 
   /** Begins a workbook whose rows will arrive in batches. */
-  book(sheets: SheetSetup[]): SyncBook {
+  book(sheets: SheetSetup[], images: Image[] = []): SyncBook {
+    this.load(images);
     const input = this.memory.writeText(JSON.stringify(sheets));
     try {
       check(this.e, this.memory, this.e.imprenta_book_open(input[0], input[1]));
@@ -72,6 +95,32 @@ export class Writer {
       this.memory.free(input);
     }
     return new SyncBook(this.e, this.memory, () => this.collect());
+  }
+
+  /**
+   * Puts this workbook's images in the module, and only this workbook's.
+   *
+   * Reset every time rather than accumulated. An instance is reused for
+   * whatever comes next, and images that stayed behind would put one
+   * customer's letterhead into another customer's export — which is not a
+   * bug anybody would report, because the file opens.
+   */
+  private load(images: Image[]): void {
+    check(this.e, this.memory, this.e.imprenta_assets_reset());
+    for (const image of images) {
+      const name = this.memory.writeText(image.name);
+      const data = this.memory.write(image.data);
+      try {
+        check(
+          this.e,
+          this.memory,
+          this.e.imprenta_assets_image(name[0], name[1], data[0], data[1]),
+        );
+      } finally {
+        this.memory.free(name);
+        this.memory.free(data);
+      }
+    }
   }
 
   /** How much linear memory the instance holds. It only ever grows. */

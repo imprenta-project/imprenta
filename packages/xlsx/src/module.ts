@@ -12,6 +12,8 @@ export interface Exports {
   memory: WebAssembly.Memory;
   imprenta_alloc(len: number): number;
   imprenta_dealloc(ptr: number, len: number): void;
+  imprenta_assets_reset(): number;
+  imprenta_assets_image(namePtr: number, nameLen: number, dataPtr: number, dataLen: number): number;
   imprenta_write(irPtr: number, irLen: number): number;
   imprenta_book_open(ptr: number, len: number): number;
   imprenta_book_rows(ptr: number, len: number): number;
@@ -31,6 +33,8 @@ const REQUIRED = [
   'memory',
   'imprenta_alloc',
   'imprenta_dealloc',
+  'imprenta_assets_reset',
+  'imprenta_assets_image',
   'imprenta_write',
   'imprenta_book_open',
   'imprenta_book_rows',

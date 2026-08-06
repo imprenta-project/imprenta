@@ -7,7 +7,7 @@ import { createServer, type ViteDevServer } from 'vite';
 import { type Context, check } from './checks.js';
 import type { Loaded } from './config.js';
 import { type Found, findDocuments, previewProps } from './documents.js';
-import { checkWorkbook } from './sheets.js';
+import { checkWorkbook, refuse } from './sheets.js';
 
 /**
  * The preview server.
@@ -110,6 +110,21 @@ function api(loaded: Loaded) {
             const done = await render(server, loaded, await load(), id);
             last = { id, bytes: done.bytes };
             return json(res, done.report);
+          }
+          if (url.pathname === '/api/image') {
+            // The grid draws a sheet's pictures, and the IR carries only the
+            // name — which is the whole point of it. This is where the bytes
+            // behind that name live, and the only reason the preview can show
+            // a letterhead at all.
+            const wanted = url.searchParams.get('name') ?? '';
+            const image = (await load()).images.find((each) => each.name === wanted);
+            if (!image) {
+              res.statusCode = 404;
+              return res.end('no image of that name is configured');
+            }
+            res.setHeader('content-type', kind(image.data));
+            res.setHeader('cache-control', 'no-store');
+            return res.end(image.data);
           }
           if (url.pathname === '/api/file') {
             const id = url.searchParams.get('id') ?? '';
@@ -374,8 +389,16 @@ async function render(
   const rendered = await renderAny(createElement(Component, previewProps(Component)));
 
   if (rendered.format === 'xlsx') {
+    // Before the write, not after: `missing-image` is a fault the engine
+    // refuses outright, so checked afterwards it would never be reached and
+    // the author would get the engine's message with no sheet named.
+    const checks = checkWorkbook(rendered.ir, { images: assets.images.map((i) => i.name) });
+    refuse(checks);
+
     const { write } = await import('@imprentajs/xlsx');
-    const out = await write(JSON.stringify(rendered.ir));
+    // The same images the page side gets. A sheet's picture names one, and
+    // the CLI is the only thing that knows where the project keeps it.
+    const out = await write(JSON.stringify(rendered.ir), { images: assets.images });
     return {
       bytes: Buffer.from(out.xlsx),
       report: {
@@ -383,7 +406,7 @@ async function render(
         format: 'xlsx',
         parts: out.sheets,
         bytes: out.bytes,
-        checks: checkWorkbook(rendered.ir),
+        checks,
         ir: rendered.ir,
       },
     };
@@ -412,6 +435,17 @@ async function render(
       ir: rendered.ir,
     },
   };
+}
+
+/**
+ * What an image turned out to be, from its own first bytes.
+ *
+ * The extension the project happened to give the file is not evidence: the
+ * engine identifies an image by its header and so does this, or the preview
+ * would show a broken picture for a PNG somebody called `.jpg`.
+ */
+function kind(data: Buffer): string {
+  return data[0] === 0x89 && data[1] === 0x50 ? 'image/png' : 'image/jpeg';
 }
 
 const TYPES = {

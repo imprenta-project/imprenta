@@ -450,6 +450,7 @@ dependencies = [
  "imprenta-xlsx",
  "serde_json",
  "thiserror",
+ "zip",
 ]
 
 [[package]]

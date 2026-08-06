@@ -20,3 +20,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 calamine = "0.35.0"
+zip = { version = "7.2.0", default-features = false, features = ["deflate"] }

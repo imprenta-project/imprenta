@@ -6,9 +6,13 @@
 
 use imprenta_core::color::Color;
 use imprenta_core::units::Edges;
-use imprenta_xlsx::ir::{Cell, Column, Freeze, Merge, Row, Sheet, Workbook};
+use imprenta_xlsx::ir::{Cell, Column, Freeze, Merge, Picture, Placement, Row, Sheet, Workbook};
 use imprenta_xlsx::style::{Across, Alignment, Border, Font, Line, Points, Style};
-use imprenta_xlsx::{serial, write_to_file};
+use imprenta_xlsx::{Image, serial, write_to_file};
+
+/// The letterhead. Kept beside the workbook rather than in it, which is the
+/// whole shape of the feature — the IR carries the name and never the bytes.
+const LOGO: &[u8] = include_bytes!("../tests/images/logo.png");
 
 const SLATE: Color = Color {
     r: 241,
@@ -121,6 +125,19 @@ fn main() {
 
     let ventas = Sheet {
         name: "Ventas".into(),
+        // Hung off the total row's merge and pushed to its far end, because
+        // that is the arithmetic worth looking at: the block is two columns
+        // and four rows of nothing that says so, and only the file shows
+        // whether the engine put the picture inside it.
+        pictures: vec![Picture {
+            image: "logo".into(),
+            row: (lines.len() + 1) as u32,
+            column: 0,
+            width: 70.0,
+            align: Placement::End,
+            valign: Placement::Center,
+            ..Picture::default()
+        }],
         columns: vec![
             Column {
                 width: Some(8.0),
@@ -168,6 +185,7 @@ fn main() {
     ]);
 
     std::fs::create_dir_all("preview").expect("preview/ should be creatable");
-    let bytes = write_to_file(&book, "preview/ventas.xlsx").expect("it should write");
+    let bytes = write_to_file(&book, &[Image::new("logo", LOGO)], "preview/ventas.xlsx")
+        .expect("it should write");
     println!("preview/ventas.xlsx — {bytes} bytes");
 }

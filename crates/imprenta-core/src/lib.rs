@@ -3,4 +3,5 @@
 pub mod color;
 pub mod diagnostic;
 pub mod envelope;
+pub mod image;
 pub mod units;

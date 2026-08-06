@@ -5,6 +5,7 @@
 //! the behaviour that matters is tested with `cargo test` on the host, with no
 //! WebAssembly runtime anywhere near it.
 
+use imprenta_xlsx::Image;
 use imprenta_xlsx::ir::Workbook;
 
 /// What came of a write.
@@ -29,17 +30,32 @@ pub enum JobError {
 /// There is no path-taking variant, unlike the Node binding. A WebAssembly
 /// module has no filesystem — which is the point of it — so the bytes always
 /// come back through linear memory and the host decides where they go.
-pub fn run(ir: &[u8]) -> Result<Outcome, JobError> {
+///
+/// `images` are the bytes the sheets' pictures name. They are handed over
+/// separately from the IR and kept across writes, exactly as the page engine
+/// keeps its fonts: a logo is the same logo on every export, and pushing it
+/// through the boundary once a workbook is work for nothing.
+pub fn run(ir: &[u8], images: &[Image]) -> Result<Outcome, JobError> {
     let book: Workbook =
         serde_json::from_slice(ir).map_err(|e| JobError::Malformed(e.to_string()))?;
     let sheets = book.sheets.len();
-    let xlsx = imprenta_xlsx::write(&book)?;
+    let xlsx = imprenta_xlsx::write(&book, images)?;
     Ok(Outcome { xlsx, sheets })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const LOGO: &[u8] = include_bytes!("../../imprenta-xlsx/tests/images/logo.png");
+
+    const WITH_A_PICTURE: &[u8] = br#"{
+        "sheets": [{
+            "name": "Ventas",
+            "rows": [{ "cells": [{ "value": { "t": "text", "v": "Concepto" } }] }],
+            "pictures": [{ "image": "logo", "row": 0, "column": 0, "width": 120 }]
+        }]
+    }"#;
 
     const BOOK: &[u8] = br#"{
         "sheets": [{
@@ -52,8 +68,27 @@ mod tests {
     }"#;
 
     #[test]
+    fn a_picture_reaches_the_package_through_the_boundary() {
+        // The IR carries the name and the bytes come alongside, which is what
+        // lets a workbook be serialised without a logo stuck to it.
+        let outcome = run(WITH_A_PICTURE, &[Image::new("logo", LOGO)]).unwrap();
+
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(outcome.xlsx)).unwrap();
+        assert!(zip.by_name("xl/media/image1.png").is_ok());
+    }
+
+    #[test]
+    fn a_picture_whose_image_never_arrived_is_an_error_and_not_a_panic() {
+        // A panic across this boundary is an unrecoverable trap, which with a
+        // pool means a dead worker rather than a message.
+        let err = run(WITH_A_PICTURE, &[]).unwrap_err();
+
+        assert!(matches!(err, JobError::Write(_)), "{err:?}");
+    }
+
+    #[test]
     fn a_declared_workbook_comes_back_as_a_package() {
-        let outcome = run(BOOK).unwrap();
+        let outcome = run(BOOK, &[]).unwrap();
 
         // An OOXML package is a zip, and a zip starts with "PK".
         assert_eq!(&outcome.xlsx[..2], b"PK");
@@ -65,22 +100,22 @@ mod tests {
         // The ABI is a way in, never a second writer. If this diverges, a
         // workbook depends on which binding produced it.
         let book: Workbook = serde_json::from_slice(BOOK).unwrap();
-        let direct = imprenta_xlsx::write(&book).unwrap();
+        let direct = imprenta_xlsx::write(&book, &[]).unwrap();
 
-        assert_eq!(run(BOOK).unwrap().xlsx, direct);
+        assert_eq!(run(BOOK, &[]).unwrap().xlsx, direct);
     }
 
     #[test]
     fn writing_twice_gives_the_same_workbook_twice() {
-        let first = run(BOOK).unwrap();
-        let second = run(BOOK).unwrap();
+        let first = run(BOOK, &[]).unwrap();
+        let second = run(BOOK, &[]).unwrap();
 
         assert_eq!(first, second);
     }
 
     #[test]
     fn a_malformed_workbook_is_an_error_and_not_a_panic() {
-        let err = run(b"{ not json").unwrap_err();
+        let err = run(b"{ not json", &[]).unwrap_err();
 
         assert!(matches!(err, JobError::Malformed(_)), "{err:?}");
     }
@@ -93,7 +128,7 @@ mod tests {
         use calamine::{Data, Reader, Xlsx};
         use std::io::Cursor;
 
-        let outcome = run(BOOK).unwrap();
+        let outcome = run(BOOK, &[]).unwrap();
 
         let mut read = Xlsx::new(Cursor::new(outcome.xlsx)).unwrap();
         let sheet = read.worksheet_range("Ventas").unwrap();
