@@ -454,3 +454,33 @@ describe('placing a picture', () => {
     expect(await placed({ align: 'start' })).not.toHaveProperty('align');
   });
 });
+
+describe('an autofilter', () => {
+  const rowOf = async (props: Record<string, unknown>) =>
+    (
+      await toWorkbook(
+        <Workbook>
+          <Sheet name="Hoja">
+            <Row {...props}>
+              <Cell>Fecha</Cell>
+              <Cell>Importe</Cell>
+            </Row>
+          </Sheet>
+        </Workbook>,
+      )
+    ).sheets[0].rows?.[0];
+
+  it('is marked on the row whose cells are the labels', async () => {
+    // The range it becomes ends at the last row of the sheet, which a producer
+    // streaming a million rows has not got yet. All the author can say is
+    // which row the labels are on.
+    expect(await rowOf({ filter: true })).toMatchObject({ filter: true });
+  });
+
+  it('says nothing when nobody asked for one', async () => {
+    // Absent is how every sheet written so far says it, and a field written
+    // out on every row would change all of them for no change.
+    expect(await rowOf({})).not.toHaveProperty('filter');
+    expect(await rowOf({ filter: false })).not.toHaveProperty('filter');
+  });
+});

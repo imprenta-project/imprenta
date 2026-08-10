@@ -355,7 +355,7 @@ import { Cell, Column, Row, Sheet, Workbook } from '@imprentajs/react/xlsx';
     <Column width={38} />
     <Column width={16} format="#,##0.00 €" />
 
-    <Row className="bg-slate-100 font-bold">
+    <Row filter className="bg-slate-100 font-bold">
       <Cell>Ref.</Cell><Cell>Concepto</Cell><Cell className="text-right">Importe</Cell>
     </Row>
     <Row>
@@ -370,6 +370,18 @@ import { Cell, Column, Row, Sheet, Workbook } from '@imprentajs/react/xlsx';
   </Sheet>
 </Workbook>
 ```
+
+A header row can carry the **autofilter** — the dropdowns Excel puts on a
+table so the recipient can sort and filter each column:
+
+```tsx
+<Row filter className="bg-slate-100 font-bold">
+```
+
+Marked on the row rather than declared as a range, because the range ends at
+the last row of the sheet and a producer streaming a million of them has not
+got there yet. The engine works it out when the sheet closes, which is the only
+moment anybody can.
 
 That distinction is the whole point. Write `1200` as text and Excel shows the
 same thing, `SUM` returns zero, and the recipient has a total that is wrong.
@@ -416,11 +428,14 @@ await book.finish();
 
 | | declared | streamed |
 |---|---:|---:|
-| 200,000 rows | 357 MB · 0.44 s | **12.9 MB · 0.38 s** |
-| 1,000,000 rows | 1,773 MB · 2.14 s | **47.9 MB · 1.93 s** |
+| 200,000 rows | 226 MB · 0.44 s | **12.6 MB · 0.40 s** |
+| 1,000,000 rows | 1,117 MB · 2.2 s | **47.6 MB · 2.0 s** |
+
+Rerun it with `cargo run -p imprenta-xlsx --example bench_memory_rows --release
+-- 1000000 1000`, which writes the same ledger both ways and compares the bytes.
 
 Same bytes, at any batch size. Unlike the PDF side, batch size makes no
-difference to the time at all — 0.38 s whether the batch is 1 or 100,000 —
+difference to the time at all — 0.40 s whether the batch is 1 or 100,000 —
 because there is no thread to hop; it changes only what the caller holds.
 
 ## The preview

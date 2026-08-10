@@ -275,6 +275,10 @@ function Cell({
   const font = style?.font;
   const align = style?.align;
   const wide = span && span !== 'covered' ? span : undefined;
+  // A dropdown on every label the filter covers, and the filter covers exactly
+  // the cells the row has — which is how the engine works its width out too, so
+  // a column past the last label gets nothing here and nothing in the file.
+  const filters = row.filter === true && cell !== undefined;
 
   return (
     <td
@@ -288,6 +292,8 @@ function Cell({
         // A cell that holds a picture cannot clip: the picture is meant to
         // spill over the cells beside it, which is what it does in Excel.
         picture ? 'relative overflow-visible' : 'overflow-hidden',
+        // Room for the dropdown, so it sits beside the label rather than on it.
+        filters && 'relative pr-5',
         ALIGNMENT[kind(cell)],
       )}
       style={{
@@ -307,7 +313,31 @@ function Cell({
     >
       {picture && <Picture picture={picture} />}
       {shown(cell)}
+      {filters && <Dropdown />}
     </td>
+  );
+}
+
+/**
+ * The dropdown Excel draws on a label the autofilter covers.
+ *
+ * Indicative, like the rest of the grid — it does not filter anything, and the
+ * banner above says the file is what Excel opens. What it is for is the slip
+ * this feature exists to prevent: marking the title row instead of the labels
+ * puts the dropdowns one row up, and here that is visible at a glance instead
+ * of after somebody opens the export.
+ *
+ * Titled rather than left as a glyph, because a chevron on a spreadsheet header
+ * could be a sort order, a collapsed group or a dozen other things.
+ */
+function Dropdown() {
+  return (
+    <span
+      title="filters this column"
+      className="pointer-events-none absolute top-1/2 right-1 -translate-y-1/2 rounded-[2px] border border-paper-300 bg-paper-100 px-[3px] text-[8px] leading-[1.5] text-paper-400"
+    >
+      ▼
+    </span>
   );
 }
 

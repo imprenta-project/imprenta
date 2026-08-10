@@ -39,6 +39,16 @@ pub enum Error {
 
     #[error(transparent)]
     Picture(#[from] PictureError),
+
+    #[error(
+        "the sheet {sheet:?} asks two rows to be its autofilter, rows {first} and {second}, \
+         and Excel has one to a sheet"
+    )]
+    TwoFilters {
+        sheet: String,
+        first: u32,
+        second: u32,
+    },
 }
 
 /// Writes a workbook and hands back the bytes.

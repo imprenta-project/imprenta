@@ -221,11 +221,17 @@ export default function LibroMayor({ rows }: Props) {
         </Row>
       </Sheet>
 
-      {/* A third, small and plain, because not every sheet is a showpiece. */}
+      {/* A third, small and plain, because not every sheet is a showpiece —
+          and the one that carries the autofilter, because it is the only one
+          here whose table runs to the last row of the sheet. The range the
+          engine writes ends where the rows end, so a sheet with totals under
+          the data would have them inside the filter: the dropdowns would offer
+          “Sumas del ejercicio” as a value to filter by, and filtering by
+          anything real would hide the totals. */}
       <Sheet name="Cuentas">
         <Column width={9} />
         <Column width={34} />
-        <Row className="font-bold border-b border-slate-400">
+        <Row filter className="font-bold border-b border-slate-400">
           <Cell>Código</Cell>
           <Cell>Denominación</Cell>
         </Row>

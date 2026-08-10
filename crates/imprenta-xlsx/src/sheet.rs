@@ -101,6 +101,32 @@ pub(crate) fn merges(list: &[Merge]) -> String {
     xml
 }
 
+/// The autofilter for a sheet, if a row asked to be its labels.
+///
+/// `header` is the row the labels are on, `columns` how many of them there
+/// are, and `rows` how many rows the sheet ended up with — which is why this
+/// is written when the sheet closes and not when the row goes past.
+///
+/// The range starts at the labels and ends at the last row: Excel reads the
+/// first row of an autofilter's range as the header and everything under it as
+/// what there is to filter, so leaving the labels out would filter by the
+/// first row of data.
+pub(crate) fn auto_filter(header: Option<u32>, columns: u32, rows: u32) -> String {
+    let Some(header) = header else {
+        return String::new();
+    };
+    if columns == 0 {
+        return String::new();
+    }
+
+    let mut range = String::new();
+    xml::cell_ref(header, 0, &mut range);
+    range.push(':');
+    xml::cell_ref(rows.saturating_sub(1).max(header), columns - 1, &mut range);
+
+    format!(r#"<autoFilter ref="{range}"/>"#)
+}
+
 /// Appends one row's XML to `buf`.
 pub fn write_row(row: &Row, index: u32, sheet: &Sheet, styles: &mut Styles, buf: &mut String) {
     // A row with nothing in it still occupies a row: leaving it out would
@@ -441,5 +467,109 @@ mod tests {
             let buf = cell_xml(&Value::Number(bad));
             assert_eq!(buf, "<c r=\"A1\"><v>0</v></c>");
         }
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+    use crate::ir::{Cell, Column, Freeze};
+
+    fn labels() -> Row {
+        Row {
+            filter: true,
+            ..Row::new(vec![
+                Cell::text("Fecha"),
+                Cell::text("Concepto"),
+                Cell::text("Importe"),
+            ])
+        }
+    }
+
+    #[test]
+    fn a_filter_covers_its_own_row_and_everything_under_it() {
+        // The range is the whole table, header included: Excel reads the first
+        // row of it as the labels and the rest as what there is to filter.
+        // Three columns and two rows of data under a header on row 2.
+        let xml = auto_filter(Some(1), 3, 4);
+
+        assert_eq!(xml, r#"<autoFilter ref="A2:C4"/>"#);
+    }
+
+    #[test]
+    fn a_filter_on_a_table_with_nothing_in_it_covers_the_labels() {
+        // A filter on an empty export is not an error: the columns are there
+        // and Excel opens the dropdowns on them. `A2:C2` is what Excel itself
+        // writes for a header with no rows under it.
+        assert_eq!(auto_filter(Some(1), 3, 2), r#"<autoFilter ref="A2:C2"/>"#);
+    }
+
+    #[test]
+    fn a_sheet_nobody_asked_to_filter_gets_nothing() {
+        // The whole feature has to cost nothing to everyone not using it, and
+        // an empty element is not nothing: Excel shows the dropdowns for it.
+        assert_eq!(auto_filter(None, 3, 40), "");
+    }
+
+    #[test]
+    fn a_filter_reaches_the_last_row_that_was_written() {
+        // Which row is last is only known when the sheet closes, and for a
+        // streamed sheet that is the one thing the author cannot say — which
+        // is the reason the range is worked out here and not declared.
+        assert_eq!(
+            auto_filter(Some(0), 2, 200_000),
+            r#"<autoFilter ref="A1:B200000"/>"#
+        );
+    }
+
+    #[test]
+    fn the_filter_is_written_before_the_merges() {
+        // The schema fixes the order of a worksheet's children and puts
+        // `autoFilter` before `mergeCells`. Out of place it is well-formed XML,
+        // invalid OOXML, and a repair dialog that names nothing.
+        let sheet = Sheet {
+            name: "Hoja".into(),
+            columns: vec![Column::default()],
+            rows: vec![labels(), Row::new(vec![Cell::text("uno")])],
+            merges: vec![crate::ir::Merge {
+                from_row: 0,
+                from_column: 0,
+                to_row: 0,
+                to_column: 1,
+            }],
+            freeze: Some(Freeze {
+                rows: 1,
+                columns: 0,
+            }),
+            ..Sheet::default()
+        };
+        let bytes = crate::write(&crate::ir::Workbook::new(vec![sheet]), &[]).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(
+            &mut zip.by_name("xl/worksheets/sheet1.xml").unwrap(),
+            &mut xml,
+        )
+        .unwrap();
+
+        let filter = xml.find("<autoFilter").expect("the sheet filters");
+        assert!(filter > xml.find("</sheetData>").unwrap(), "{xml}");
+        assert!(filter < xml.find("<mergeCells").unwrap(), "{xml}");
+    }
+
+    #[test]
+    fn two_rows_asking_to_be_the_filter_is_refused() {
+        // Excel has one autofilter a sheet. Two marked rows is somebody
+        // copying a header block, and the alternative to saying so is a file
+        // where the second one silently wins.
+        let sheet = Sheet {
+            name: "Hoja".into(),
+            rows: vec![labels(), labels()],
+            ..Sheet::default()
+        };
+        let why = crate::write(&crate::ir::Workbook::new(vec![sheet]), &[])
+            .expect_err("two filters on one sheet");
+
+        assert!(matches!(why, crate::Error::TwoFilters { .. }), "{why:?}");
     }
 }

@@ -36,7 +36,7 @@ use zip::write::SimpleFileOptions;
 use crate::ir::{Merge, Row, Sheet};
 use crate::package::{Error, content_types, options, part, root_rels, workbook_rels, workbook_xml};
 use crate::picture::{Image, PictureError, Stored, deepest_row, drawing, drawing_rels, stored};
-use crate::sheet::{columns, merges, views, write_row};
+use crate::sheet::{auto_filter, columns, merges, views, write_row};
 use crate::style::Styles;
 
 /// A workbook being written a batch of rows at a time.
@@ -60,6 +60,10 @@ pub struct Session<W: Write + Seek> {
     keep_to: Option<u32>,
     /// One reusable buffer. Nothing here allocates per row.
     buf: String,
+    /// Which row asked to be the open sheet's autofilter, and how wide it is.
+    /// Kept while the sheet is open because the range it becomes ends at the
+    /// last row, which is only known when the sheet closes.
+    filter: Option<(u32, u32)>,
     /// The images some sheet names, identified once and numbered.
     stored: Vec<Stored>,
     /// The bytes, kept until `finish` writes the media parts. A logo, not a
@@ -111,6 +115,7 @@ impl<W: Write + Seek> Session<W> {
             buf: String::new(),
             stored,
             images,
+            filter: None,
         };
         session.begin()?;
         Ok(session)
@@ -122,6 +127,20 @@ impl<W: Write + Seek> Session<W> {
     /// the overhead swamps the saving. What the caller holds is one batch.
     pub fn rows(&mut self, rows: &[Row]) -> Result<(), Error> {
         for row in rows {
+            if row.filter {
+                // Excel has one autofilter to a sheet. Two marked rows is
+                // somebody copying a header block, and the alternative to
+                // saying so is a file where the second one silently wins.
+                if let Some((first, _)) = self.filter {
+                    return Err(Error::TwoFilters {
+                        sheet: self.sheets[self.at].name.clone(),
+                        first: first + 1,
+                        second: self.row + 1,
+                    });
+                }
+                self.filter = Some((self.row, row.cells.len() as u32));
+            }
+
             self.buf.clear();
             let sheet = &self.sheets[self.at];
             write_row(row, self.row, sheet, &mut self.styles, &mut self.buf);
@@ -236,6 +255,7 @@ impl<W: Write + Seek> Session<W> {
         self.zip.write_all(head.as_bytes())?;
 
         self.row = 0;
+        self.filter = None;
         self.keep_to = deepest_row(sheet);
 
         // Rows the sheet was declared with go in before anything streamed, so
@@ -251,6 +271,12 @@ impl<W: Write + Seek> Session<W> {
     fn end(&mut self) -> Result<(), Error> {
         self.zip.write_all(b"</sheetData>")?;
         self.written[self.at] = self.row;
+        // The order the schema fixes for a worksheet's children: the filter
+        // before the merges, and the drawing after both. Out of place it is
+        // well-formed XML, invalid OOXML, and a repair dialog naming nothing.
+        let (header, columns) = self.filter.map_or((None, 0), |(r, c)| (Some(r), c));
+        self.zip
+            .write_all(auto_filter(header, columns, self.row).as_bytes())?;
         let all = merges(&self.sheets[self.at].merges);
         self.zip.write_all(all.as_bytes())?;
         // Last in the schema's order for a worksheet, and out of place it is a

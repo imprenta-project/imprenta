@@ -204,3 +204,32 @@ describe('a picture, all the way to the package', () => {
     expect(drawing).toContain('<xdr:ext cx="1524000" cy="508000"/>');
   });
 });
+
+describe('an autofilter, all the way to the package', () => {
+  it('reaches the last row that was written, not the one that was declared', async () => {
+    // The one test that can catch `ir.ts` and `ir.rs` disagreeing about the
+    // flag: serde drops a field it does not know without a word, and a sheet
+    // that quietly lost its filter looks exactly like one that never asked.
+    const { bytes } = await through(
+      <Workbook>
+        <Sheet name="Hoja">
+          <Row filter>
+            <Cell>Fecha</Cell>
+            <Cell>Importe</Cell>
+          </Row>
+          <Row>
+            <Cell>01</Cell>
+            <Cell value={10} />
+          </Row>
+          <Row>
+            <Cell>02</Cell>
+            <Cell value={20} />
+          </Row>
+        </Sheet>
+      </Workbook>,
+    );
+
+    const sheet = await partOf(bytes, 'xl/worksheets/sheet1.xml');
+    expect(sheet).toContain('<autoFilter ref="A1:B3"/>');
+  });
+});

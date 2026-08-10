@@ -190,6 +190,10 @@ fn is_zero(value: &f64) -> bool {
     *value == 0.0
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 impl Sheet {
     pub fn new(name: impl Into<String>, rows: Vec<Row>) -> Self {
         Self {
@@ -247,6 +251,14 @@ pub struct Row {
     /// In points, as everything vertical is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<f64>,
+    /// Whether this row's cells are the labels of an autofilter.
+    ///
+    /// Marked on the row and not declared as a range, because the range ends
+    /// at the last row of the sheet — and for a sheet whose rows are streamed
+    /// that is the one thing the author cannot know. The engine works it out
+    /// when the sheet closes, which is the only moment it is knowable.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub filter: bool,
     /// The format for this row, including the cells it does not have.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style: Option<Style>,

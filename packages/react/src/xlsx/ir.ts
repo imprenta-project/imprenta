@@ -56,6 +56,8 @@ export interface IrRow {
   /** In points. */
   height?: number;
   style?: CellStyle;
+  /** Whether these cells are the labels of the sheet's autofilter. */
+  filter?: boolean;
 }
 
 export interface IrCell {

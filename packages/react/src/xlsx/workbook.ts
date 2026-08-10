@@ -129,7 +129,11 @@ function toRow(
   pictures: IrPicture[],
   theme: Theme,
 ): IrRow {
-  const props = node.props as { height?: number; className?: string };
+  const props = node.props as {
+    height?: number;
+    className?: string;
+    filter?: boolean;
+  };
   const style = styleOf(props, theme);
   const cells: IrCell[] = [];
 
@@ -174,6 +178,8 @@ function toRow(
     ...(cells.length ? { cells } : {}),
     ...(props.height !== undefined ? { height: props.height } : {}),
     ...(style ? { style } : {}),
+    // Absent means no filter, which is how every sheet written so far says it.
+    ...(props.filter ? { filter: true } : {}),
   };
 }
 

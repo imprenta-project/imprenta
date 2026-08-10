@@ -50,6 +50,21 @@ export interface ColumnProps extends Styled {
 export interface RowProps extends Styled {
   /** In points, as everything vertical is. */
   height?: number;
+
+  /**
+   * Whether this row's cells are the labels of an autofilter.
+   *
+   * The dropdowns Excel puts on a header so the recipient can filter and sort
+   * each column. Marked on the row rather than declared as a range, because
+   * the range ends at the last row of the sheet — and a producer streaming a
+   * million rows does not know which that is. The engine works it out when the
+   * sheet closes, which is the only moment anybody can.
+   *
+   * One to a sheet, which is what Excel allows. Two rows asking for it is
+   * refused rather than letting the second quietly win.
+   */
+  filter?: boolean;
+
   children?: ReactNode;
 }
 
