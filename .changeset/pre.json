@@ -10,6 +10,7 @@
   },
   "changesets": [
     "a-border-colour-written-out",
+    "a-header-that-filters",
     "a-logo-in-a-spreadsheet",
     "aligned-paragraphs",
     "bands-on-every-released-page",
