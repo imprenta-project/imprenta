@@ -8,7 +8,7 @@
 use imprenta_core::color::Color;
 use imprenta_core::units::{Edges, Length, Pt};
 use imprenta_pdf::atom::Atom;
-use imprenta_pdf::content::Content;
+use imprenta_pdf::content::{BoxContent, Content};
 use imprenta_pdf::decoration::{BorderSide, Decoration};
 use imprenta_pdf::pack::{Contribution, Flow, Group, Repeat, pack};
 use imprenta_pdf::render::{Geometry, Options, render_with};
@@ -53,16 +53,40 @@ fn main() {
     let mut contents: Vec<Content> = Vec::new();
     let mut contributions: Vec<Contribution> = Vec::new();
 
-    let header = layout.row(
+    // Two rows, because the two money columns are one thing said twice and a
+    // reader should be told so once. The group name covers both of them —
+    // the row is written short rather than padded, since the columns a span
+    // covers belong to it.
+    let white = |t: &str| Cell::new(t, Pt(8.0)).inked(hex("#FFFFFF"));
+    let group = layout.row(
         &mut shaper,
-        &["Cuenta", "Descripción", "Documento", "Debe", "Haber"]
-            .map(|t| Cell::new(t, Pt(8.0)).inked(hex("#FFFFFF"))),
+        &[
+            white(""),
+            white(""),
+            white(""),
+            white("Importe del ejercicio").spanning(2),
+        ],
         Decoration {
             background: Some(navy),
             ..Default::default()
         },
         pad,
     );
+    let labels = layout.row(
+        &mut shaper,
+        &["Cuenta", "Descripción", "Documento", "Debe", "Haber"].map(white),
+        Decoration {
+            background: Some(navy),
+            ..Default::default()
+        },
+        pad,
+    );
+    // The two rows are stacked into one atom, not pushed as two: a repeated
+    // prefix is one indivisible block, so a header that grew a row costs the
+    // packer nothing and cannot be split from the row that explains it.
+    let header = BoxContent::default()
+        .stack(Content::Box(group))
+        .stack(Content::Box(labels));
     let header_height = header.height();
     atoms.push(Atom::new(header_height).keep_with_next());
     contents.push(Content::Box(header));

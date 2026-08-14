@@ -514,6 +514,15 @@ pub struct TotalContribution {
 #[serde(rename_all = "camelCase", default)]
 pub struct Cell {
     pub text: String,
+    /// How many columns it covers. Absent is one, which is every cell but a
+    /// group name in a two-level header.
+    ///
+    /// `colSpan` and not `span` because that is what the same idea is called
+    /// on a spreadsheet cell, and because `Span` is already an inline run of
+    /// text. The models are not shared — a sheet records a merge on the sheet
+    /// and the columns under it stay — but the word an author writes is.
+    #[serde(default)]
+    pub col_span: Option<usize>,
     #[serde(default)]
     pub size: Option<Pt>,
     #[serde(default)]
@@ -528,6 +537,7 @@ impl Cell {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            col_span: None,
             size: None,
             color: None,
             weight: Weight::Regular,

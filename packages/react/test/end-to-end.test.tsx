@@ -164,6 +164,43 @@ describe('React to PDF', () => {
     expect(out.diagnostics).toEqual([]);
   });
 
+  it('sets a group name over the columns it names', async () => {
+    // `colSpan` is a field of the contract and this is the only test that can
+    // say the two halves read it the same way: the React side spreads a cell
+    // through verbatim, so a name the engine does not know would travel all
+    // the way here and be dropped in silence.
+    //
+    // Read through the engine's own arithmetic rather than through the bytes:
+    // a header of two cells over three columns is only right if one of them
+    // covers two, and a row that does not cover its columns is exactly what
+    // `cell-without-column` is for.
+    const grouped = async (colSpan: number) =>
+      toPdf(
+        await render(
+          <Document>
+            <Table
+              columns={[{ width: 120 }, { width: 90, align: 'end' }, { width: 90, align: 'end' }]}
+              header={[
+                { cells: [{ text: 'Cuenta' }, { text: 'Periodo', colSpan }] },
+                { cells: [{ text: '' }, { text: 'Debe' }, { text: 'Haber' }] },
+              ]}
+              rows={[{ cells: [{ text: '430000' }, { text: '1.200,00' }, { text: '0,00' }] }]}
+            />
+          </Document>,
+        ),
+        assets,
+      );
+
+    const covered = await grouped(2);
+    expect(covered.diagnostics).toEqual([]);
+
+    // The same document with the span taken away is a header short of a cell,
+    // which the engine cannot see — so what pins the span is that the ink
+    // moves: the name is set against the end of what it covers.
+    const halved = await grouped(1);
+    expect(Buffer.from(covered.pdf).equals(Buffer.from(halved.pdf))).toBe(false);
+  });
+
   it('prints what Tailwind classes asked for', async () => {
     // The test that was missing when the React side invented its own shape
     // for a border and nothing noticed: unit tests on either side agreed

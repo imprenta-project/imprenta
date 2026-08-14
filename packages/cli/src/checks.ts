@@ -238,18 +238,24 @@ function table(
   for (const row of [...header, ...rows]) {
     const cells = (row.cells ?? []) as {
       text?: string;
+      colSpan?: number;
       size?: number;
       color?: string;
       weight?: string;
       italic?: boolean;
     }[];
-    if (columns > 0 && cells.length !== columns) {
+    // Columns covered, not cells written: a group name over the pair of
+    // columns it names is one cell for two, and counting cells called the one
+    // shape a span exists for an error — while telling the author the engine
+    // would drop something it lines up instead.
+    const covered = cells.reduce((total, cell) => total + Math.max(1, cell.colSpan ?? 1), 0);
+    if (columns > 0 && covered !== columns) {
       found.push({
         rule: 'ragged-row',
         status: 'error',
         source: 'document',
         occurrences: 1,
-        detail: `a row has ${cells.length} cells where the table declares ${columns} columns; the engine will drop the difference`,
+        detail: `a row covers ${covered} columns where the table declares ${columns}; the engine will drop the difference`,
         where: 'table',
       });
     }

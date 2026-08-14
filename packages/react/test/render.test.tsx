@@ -271,6 +271,36 @@ describe('tables and lists', () => {
     expect(headerOf(1)).toEqual([{ cells }, { cells: [{ text: 'FECHA' }] }]);
   });
 
+  it('carries a cell colSpan through to the IR under the name the engine reads', async () => {
+    // A cell is spread into the IR verbatim, so what this holds is the name
+    // rather than the passing: `colSpan` is what `ir::Cell` deserialises, and
+    // a cell renamed on one side would travel through here untouched and be
+    // dropped by serde without a word. The type checker is the other half —
+    // the literal below is checked against `CellProps` — and the engine's own
+    // answer is in `end-to-end.test.tsx`.
+    const document = await toDocument(
+      <Document>
+        <Table
+          columns={[{ width: 40 }, { width: 40 }, { width: 40 }]}
+          header={[
+            { cells: [{ text: 'Cuenta' }, { text: 'Periodo', colSpan: 2 }] },
+            {
+              cells: [{ text: '' }, { text: 'Debe' }, { text: 'Haber' }],
+            },
+          ]}
+          rows={[]}
+        />
+      </Document>,
+    );
+
+    const header = (document.children[0] as unknown as { header: unknown[] }).header;
+
+    expect(header).toEqual([
+      { cells: [{ text: 'Cuenta' }, { text: 'Periodo', colSpan: 2 }] },
+      { cells: [{ text: '' }, { text: 'Debe' }, { text: 'Haber' }] },
+    ]);
+  });
+
   it('resolves a row style exactly as it resolves a box style', async () => {
     // `RowProps.style` is typed as a box's props and an author is entitled to
     // read that literally: the three words that draw a hairline under a box

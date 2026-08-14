@@ -137,6 +137,20 @@ export interface ColumnProps {
 
 export interface CellProps {
   text: string;
+  /**
+   * How many columns the cell covers. One when absent.
+   *
+   * What it is for is a two-level header: a group name over the pair of
+   * columns it names. The cell takes the x of the first column it covers and
+   * the width of all of them, so it lines up with them exactly. A span past
+   * the last column stops at the last column.
+   *
+   * The columns it covers belong to it: the next cell in the row starts after
+   * them, so a spanned header row is written short rather than padded with
+   * the blanks a spreadsheet would want. Its alignment and its overflow are
+   * the first column's — a group name has no column of its own to ask.
+   */
+  colSpan?: number;
   size?: number;
   color?: string;
   weight?: 'regular' | 'bold';

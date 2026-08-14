@@ -1241,7 +1241,8 @@ fn cells_of(row: &ir::Row, default_size: Pt) -> Vec<Cell> {
         .iter()
         .map(|c| {
             let mut cell = Cell::new(&c.text, c.size.unwrap_or(default_size))
-                .in_face(face_of(c.weight, c.italic));
+                .in_face(face_of(c.weight, c.italic))
+                .spanning(c.col_span.unwrap_or(1));
             if let Some(color) = c.color {
                 cell = cell.inked(color);
             }
@@ -1621,6 +1622,109 @@ mod tests {
         assert!(
             with.pdf.len() > without.pdf.len(),
             "repeating the header should add content"
+        );
+    }
+
+    /// A declared `colSpan` reaches the page, not just the layout API.
+    ///
+    /// `table::Layout` has covered spans since they were added and says so in
+    /// its own tests, but what a document declares gets there through
+    /// `cells_of`, and that one line is the whole of the path: taking it out
+    /// left every test in the workspace green while no document could span
+    /// anything. So this asks the question at the only place that answers it
+    /// — where the ink lands.
+    ///
+    /// Read through alignment, because that is where a width shows: the group
+    /// name is set against the end of what it covers, so covering two columns
+    /// instead of one has to push it right.
+    #[test]
+    fn a_declared_span_covers_its_columns_on_the_page() {
+        let table = |span: Option<usize>| {
+            let column = ir::ColumnSpec {
+                width: Length::Pt(Pt(80.0)),
+                align: ir::Align::End,
+                overflow: ir::Overflow::Wrap,
+            };
+            ir::Node::Table(ir::Table {
+                columns: vec![column.clone(), column.clone(), column],
+                header: Vec::new(),
+                rows: vec![ir::Row {
+                    cells: vec![ir::Cell {
+                        text: "Periodo".into(),
+                        col_span: span,
+                        ..ir::Cell::new("")
+                    }],
+                    ..Default::default()
+                }],
+                repeat_header: false,
+                padding: Edges::all(Pt(0.0)),
+                space_after: Pt(0.0),
+            })
+        };
+
+        // Uncompressed, so the text matrix can be read out of the stream.
+        let plain = Options { compress: false };
+        let alone = build(&document(vec![table(None)]), &assets(), plain).expect("build");
+        let over_two = build(&document(vec![table(Some(2))]), &assets(), plain).expect("build");
+
+        let at = |pdf: &[u8]| {
+            let text = String::from_utf8_lossy(pdf).into_owned();
+            let marker = text.find(" Tm").expect("nothing was painted");
+            let head = &text[..marker];
+            head[head.rfind('\n').map_or(0, |n| n + 1)..].to_string()
+        };
+        let x = |placing: &str| {
+            placing
+                .split_whitespace()
+                .nth(4)
+                .expect("a text matrix has six numbers")
+                .parse::<f32>()
+                .expect("the x of a text matrix is a number")
+        };
+
+        // One column is 80 pt, so a name set against the end of two of them
+        // starts exactly a column further right.
+        assert!(
+            (x(&at(&over_two.pdf)) - x(&at(&alone.pdf)) - 80.0).abs() < 0.01,
+            "the span did not reach the page: {} against {}",
+            at(&over_two.pdf),
+            at(&alone.pdf)
+        );
+    }
+
+    /// Cells that cover more columns than the table has are still reported.
+    ///
+    /// The other half of the same path, and the half an author is most likely
+    /// to hit: two cells can now overrun a two-column table between them.
+    #[test]
+    fn a_declared_span_that_overruns_the_table_is_reported() {
+        let built = built(vec![ir::Node::Table(ir::Table {
+            columns: vec![ir::ColumnSpec::default(), ir::ColumnSpec::default()],
+            header: Vec::new(),
+            rows: vec![ir::Row {
+                cells: vec![
+                    ir::Cell {
+                        text: "el grupo".into(),
+                        col_span: Some(2),
+                        ..ir::Cell::new("")
+                    },
+                    ir::Cell::new("sobra"),
+                ],
+                ..Default::default()
+            }],
+            repeat_header: false,
+            padding: Edges::all(Pt(0.0)),
+            space_after: Pt(0.0),
+        })]);
+
+        let reported = built
+            .diagnostics
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            reported.iter().any(|d| d.contains("cell-without-column")),
+            "the overrun was not reported: {reported:?}"
         );
     }
 

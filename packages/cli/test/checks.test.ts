@@ -189,6 +189,45 @@ describe('check', () => {
 
       expect(found).toEqual([]);
     });
+
+    it('counts a cell that covers two columns as two', () => {
+      // A grouped header is short of a cell on purpose: the group name covers
+      // the pair of columns it names. Counting cells rather than the columns
+      // they cover called the one shape the span exists for an error, and
+      // told the author the engine would drop something it does not drop.
+      const found = check(
+        document([
+          {
+            t: 'table',
+            columns: [{}, {}, {}],
+            header: [
+              { cells: [{ text: 'Cuenta' }, { text: 'Periodo', colSpan: 2 }] },
+              { cells: [{ text: '' }, { text: 'Debe' }, { text: 'Haber' }] },
+            ],
+            rows: [{ cells: [{ text: 'a' }, { text: 'b' }, { text: 'c' }] }],
+          },
+        ]),
+        [],
+      );
+
+      expect(found).toEqual([]);
+    });
+
+    it('objects when the spans cover more columns than the table has', () => {
+      const found = check(
+        document([
+          {
+            t: 'table',
+            columns: [{}, {}],
+            rows: [{ cells: [{ text: 'a', colSpan: 2 }, { text: 'b' }] }],
+          },
+        ]),
+        [],
+      );
+
+      expect(rules(found)).toEqual(['ragged-row']);
+      expect(found[0].detail).toContain('3 columns');
+    });
   });
 
   describe('links', () => {

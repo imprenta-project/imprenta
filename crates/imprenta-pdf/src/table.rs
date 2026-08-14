@@ -159,6 +159,13 @@ pub struct Cell {
     pub size: Pt,
     pub color: Color,
     pub face: Face,
+    /// How many columns this cell covers. One is a cell; more is a group.
+    ///
+    /// A two-level header — a group name over the pair of columns it names —
+    /// is the shape every grouped report takes, and it is the only reason
+    /// this exists. Zero is read as one: a cell that covers nothing is not a
+    /// thing a caller can mean.
+    pub span: usize,
 }
 
 impl Cell {
@@ -168,7 +175,14 @@ impl Cell {
             size,
             color: Color::BLACK,
             face: Face::REGULAR,
+            span: 1,
         }
+    }
+
+    /// Covers `columns` of them instead of one.
+    pub fn spanning(mut self, columns: usize) -> Self {
+        self.span = columns.max(1);
+        self
     }
 
     pub fn in_face(mut self, face: Face) -> Self {
@@ -237,20 +251,58 @@ impl Layout {
 
         // A cell with no column is dropped rather than piled onto its
         // neighbour: a missing cell is visible, an overlapping one is not.
-        for ((cell, track), column) in cells.iter().zip(&self.tracks).zip(&self.columns) {
+        //
+        // The walk is by track and not by index because a cell may cover
+        // several: what it gets is the x of the first and the width of all of
+        // them together, including whatever sits between, so a group name
+        // lines up with its columns exactly.
+        let mut at = 0usize;
+        let mut used = 0usize;
+
+        // What the row asked for, in columns rather than in cells, because a
+        // cell is no longer worth one: it is what the overrun is reported in
+        // below. Saturating because the span is a number the author declared
+        // and a document may not be able to trap the engine — adding an
+        // absurd one overflowed, which panics in a debug build and wraps in a
+        // release one, and a wrapped index landed the cell back among columns
+        // already placed.
+        let mut asked = 0usize;
+
+        for cell in cells {
+            let span = cell.span.max(1);
+            asked = asked.saturating_add(span);
+
+            let Some(first) = self.tracks.get(at) else {
+                continue;
+            };
+            let last = at.saturating_add(span - 1).min(self.tracks.len() - 1);
+            let end = self.tracks[last];
+
+            let merged = Track {
+                x: first.x,
+                width: end.x + end.width - first.x,
+            };
+            // Alignment and overflow come from the first column the cell
+            // covers. A group name has no column of its own to ask, and the
+            // one it starts in is the one an author is looking at when they
+            // write the header.
+            let column = self.columns[at];
+
             row = row.place(
-                track.x,
-                self.cell(shaper, cell, *track, *column, diagnostics),
+                merged.x,
+                self.cell(shaper, cell, merged, column, diagnostics),
             );
+
+            at = last + 1;
+            used += 1;
         }
 
-        if cells.len() > self.tracks.len() {
+        if used < cells.len() {
             diagnostics.report(
                 Diagnostic::error(
                     "cell-without-column",
                     format!(
-                        "{} cells were given but the table declares {} columns",
-                        cells.len(),
+                        "the cells cover {asked} columns but the table declares {}",
                         self.tracks.len()
                     ),
                 )
@@ -515,6 +567,18 @@ mod tests {
         match &cell.content {
             Content::Box(b) => cell.x + b.children[0].x,
             _ => cell.x,
+        }
+    }
+
+    /// The width the cell's own box was given, which is its track's.
+    ///
+    /// The only way a span shows from outside: a cell that covers two columns
+    /// is one box as wide as both.
+    #[track_caller]
+    fn cell_width(row: &BoxContent, i: usize) -> Pt {
+        match &row.children[i].content {
+            Content::Box(b) => b.width.expect("a cell box is given its track's width"),
+            other => panic!("expected a cell box, got {other:?}"),
         }
     }
 
@@ -1426,6 +1490,141 @@ mod tests {
         assert_eq!(
             batched.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
             serial.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+        );
+    }
+
+    /// A header cell can cover the columns its group holds together.
+    ///
+    /// A two-level header — a group name over the pair of columns it names —
+    /// is the shape every grouped report takes, and without a span the name
+    /// has to sit over the left half of its pair and pretend. The cell takes
+    /// the x of the first track it covers and the width of all of them,
+    /// including the gap between, so it lines up with the columns exactly.
+    #[test]
+    fn a_cell_can_span_several_columns() {
+        let layout = Layout::new(
+            vec![fixed(40.0), fixed(60.0), fixed(60.0), fixed(40.0)],
+            Pt(200.0),
+        );
+        let cells = [
+            Cell::new("uno", Pt(8.0)),
+            Cell::new("el grupo", Pt(8.0)).spanning(2),
+            Cell::new("cuatro", Pt(8.0)),
+        ];
+
+        let row = layout.row(
+            &mut shaper(),
+            &cells,
+            Decoration::default(),
+            Edges::all(Pt(0.0)),
+        );
+
+        // Three cells over four columns: the middle one covers two of them.
+        assert_eq!(row.children.len(), 3);
+        assert_close(row.children[0].x, Pt(0.0));
+        assert_close(row.children[1].x, Pt(40.0));
+        assert_close(row.children[2].x, Pt(160.0));
+    }
+
+    /// The spanned cell is as wide as the columns it covers.
+    #[test]
+    fn a_spanning_cell_is_as_wide_as_what_it_covers() {
+        let layout = Layout::new(vec![fixed(40.0), fixed(60.0), fixed(60.0)], Pt(160.0));
+        let cells = [
+            Cell::new("uno", Pt(8.0)),
+            Cell::new("x", Pt(8.0)).spanning(2),
+        ];
+
+        let row = layout.row(
+            &mut shaper(),
+            &cells,
+            Decoration::default(),
+            Edges::all(Pt(0.0)),
+        );
+
+        assert_close(cell_width(&row, 1), Pt(120.0));
+    }
+
+    /// A span wider than what is left is clamped, not wrapped around.
+    #[test]
+    fn a_span_past_the_last_column_stops_at_the_last_column() {
+        let layout = Layout::new(vec![fixed(40.0), fixed(60.0)], Pt(100.0));
+        let cells = [Cell::new("todo", Pt(8.0)).spanning(9)];
+
+        let row = layout.row(
+            &mut shaper(),
+            &cells,
+            Decoration::default(),
+            Edges::all(Pt(0.0)),
+        );
+
+        assert_eq!(row.children.len(), 1);
+        assert_close(cell_width(&row, 0), Pt(100.0));
+    }
+
+    /// A span no arithmetic can hold is still only the columns there are.
+    ///
+    /// The span arrives in a declared document, so it is a number the author
+    /// controls and the engine may not trap on: adding it to the column
+    /// reached overflowed, which is a panic in a debug build and — worse,
+    /// because nothing says so — a wrap in a release one, and a wrapped index
+    /// put the cell back among columns already used and overlapped them.
+    #[test]
+    fn a_span_too_large_to_add_is_still_clamped() {
+        let layout = Layout::new(vec![fixed(40.0), fixed(60.0), fixed(60.0)], Pt(160.0));
+        let cells = [
+            Cell::new("uno", Pt(8.0)),
+            Cell::new("dos", Pt(8.0)),
+            Cell::new("enorme", Pt(8.0)).spanning(usize::MAX),
+        ];
+
+        let row = layout.row(
+            &mut shaper(),
+            &cells,
+            Decoration::default(),
+            Edges::all(Pt(0.0)),
+        );
+
+        assert_eq!(row.children.len(), 3);
+        assert_close(row.children[2].x, Pt(100.0));
+        assert_close(cell_width(&row, 2), Pt(60.0));
+    }
+
+    /// What is dropped is counted in columns, because a span is.
+    ///
+    /// Counting cells against columns read as a contradiction the moment one
+    /// cell could cover two — "2 cells were given but the table declares 2
+    /// columns" is true and tells the author nothing. What overran is how
+    /// many columns the cells asked for.
+    #[test]
+    fn the_dropped_cell_is_reported_in_the_columns_it_asked_for() {
+        let layout = Layout::new(vec![fixed(40.0), fixed(60.0)], Pt(100.0));
+        let cells = [
+            Cell::new("el grupo", Pt(8.0)).spanning(2),
+            Cell::new("sobra", Pt(8.0)),
+        ];
+        let mut diagnostics = Diagnostics::default();
+
+        layout.row_reporting(
+            &mut shaper(),
+            &cells,
+            Decoration::default(),
+            Edges::all(Pt(0.0)),
+            &mut diagnostics,
+        );
+
+        let reported = diagnostics
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reported.len(),
+            1,
+            "expected one diagnostic, got {reported:?}"
+        );
+        assert!(
+            reported[0].contains("3 columns") && reported[0].contains("declares 2"),
+            "the message should count columns asked for, got {reported:?}"
         );
     }
 }

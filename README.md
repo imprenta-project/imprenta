@@ -130,6 +130,25 @@ const Invoice = ({ number, items }) => (
 const ir = await render(<Invoice number="FV-2026-00418" items={items} />);
 ```
 
+A header can be several rows, and a cell in one can cover the columns its
+group holds together:
+
+```tsx
+<Table
+  columns={[{ width: 120 }, { width: 90, align: 'end' }, { width: 90, align: 'end' }]}
+  header={[
+    { cells: [{ text: 'Cuenta' }, { text: 'Importe del ejercicio', colSpan: 2 }] },
+    { cells: [{ text: '' }, { text: 'Debe' }, { text: 'Haber' }] },
+  ]}
+  rows={apuntes}
+/>
+```
+
+The columns a cell covers belong to it, so the row is written short rather
+than padded; its alignment is the first column's, since a table's style
+belongs to whoever declared the columns. Every header row comes back at the
+top of each page the table runs onto.
+
 Components, hooks and context all work — it is a real React renderer, not a
 tree walk — and what comes out is the IR, not HTML. `<Text>` flattens what is
 nested inside it into styled runs, joining neighbours that match so that where
