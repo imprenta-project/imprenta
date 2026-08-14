@@ -10,6 +10,7 @@
   },
   "changesets": [
     "a-border-colour-written-out",
+    "a-cell-over-two-columns",
     "a-header-that-filters",
     "a-logo-in-a-spreadsheet",
     "aligned-paragraphs",
