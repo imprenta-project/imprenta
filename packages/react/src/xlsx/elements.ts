@@ -31,7 +31,65 @@ export interface SheetProps {
   name: string;
   /** Rows and columns held still while the rest scrolls. */
   freeze?: { rows?: number; columns?: number };
+
+  /**
+   * The sheet's rows as plain data, appended after whatever rows the children
+   * declare.
+   *
+   * The same shape `<Row>` and `<Cell>` spell out, minus the elements — and
+   * that is the point. A React element per cell costs a fiber, an instance
+   * and a props object for the duration of one synchronous render; measured
+   * on 200 000 rows, 6 427 bytes of heap per row against 865 for the same
+   * rows as data (issue #11). A ledger declares its header band as children,
+   * where layout reads naturally, and hands the body over here, where a
+   * hundred thousand rows are just an array.
+   */
+  rows?: SheetRow[];
+
   children?: ReactNode;
+}
+
+/** One row of {@link SheetProps.rows}: what `<Row>` says, as data. */
+export interface SheetRow {
+  cells?: SheetCell[];
+  /** In points, as everything vertical is. */
+  height?: number;
+  /** Tailwind classes, resolved against the theme in force. */
+  className?: string;
+  /** Whether this row's cells are the labels of the sheet's autofilter. */
+  filter?: boolean;
+}
+
+/** One cell of a data row: what `<Cell>` says, as data. Text goes in `value` —
+ * a string stays text, leading zeros and all, exactly as children would. */
+export interface SheetCell {
+  value?: string | number | boolean | Date;
+  /** A formula, with or without its leading `=`. */
+  formula?: string;
+  /** What the formula comes to, if the producer already knows. */
+  cached?: number;
+  /** A number format code, such as `#,##0.00` or `dd/mm/yyyy`. */
+  format?: string;
+  /** Tailwind classes, resolved against the theme in force. */
+  className?: string;
+  /** How many columns this cell covers. Becomes a merge. */
+  colSpan?: number;
+  /** How many rows this cell covers. Becomes a merge. */
+  rowSpan?: number;
+  /** An image hung off this cell, as `<Image>` inside a `<Cell>` would be. */
+  image?: SheetImage;
+}
+
+/** What `<Image>` says, as data on a cell of {@link SheetProps.rows}. */
+export interface SheetImage {
+  /** The name the bytes were handed over under. */
+  src: string;
+  /** In points. The height comes from the image's own pixels. */
+  width: number;
+  align?: 'start' | 'center' | 'end';
+  valign?: 'start' | 'center' | 'end';
+  /** A nudge from wherever it was placed, in points. */
+  offset?: { x?: number; y?: number };
 }
 
 export interface ColumnProps extends Styled {

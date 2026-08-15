@@ -53,6 +53,17 @@ what it looks like; which files it is set in belongs to whoever prints it.
   avoid.
 - **`prune` before emitting.** The IR carries no `undefined` fields; a smaller
   document is fewer allocations on the Rust side, and absent is meaningful.
+- **Bulk rows are data, not elements.** `<Table rows>` on the page and
+  `<Sheet rows>` on the workbook take plain objects React never looks inside,
+  because an element per cell costs a fiber, an `Instance` and a props object
+  per node — measured at 6,427 B of heap per row against 916 as data (issue
+  #11). The data form must produce IR identical to the children form, through
+  the same functions, and `xlsx-rows-prop.test.tsx` holds that line.
+- **`render` for xlsx returns UTF-8 bytes, encoded in pieces.** V8 caps a
+  string at 512 MiB and a large workbook died there (issue #12). `encode.ts`
+  must stay byte-for-byte identical to `JSON.stringify` — the test asserts
+  equality against the real thing, because "equivalent" is where two
+  serialisers drift.
 - **Text is styled runs, never a bare string.** `runs`/`inline` flatten what is
   nested inside `<Text>` and **join neighbours that match**, so where JSX
   happened to split a string never reaches the shaper.

@@ -1,5 +1,6 @@
 import { type Node as HostNode, type Instance, isText } from '../host.js';
 import type { Theme } from '../tailwind.js';
+import type { SheetRow } from './elements.js';
 import type {
   CellStyle,
   IrCell,
@@ -56,6 +57,7 @@ function toSheet(node: Instance, theme: Theme): IrSheet {
   const props = node.props as {
     name?: unknown;
     freeze?: { rows?: number; columns?: number };
+    rows?: SheetRow[];
   };
 
   const name = String(props.name ?? '');
@@ -103,6 +105,12 @@ function toSheet(node: Instance, theme: Theme): IrSheet {
     }
   }
 
+  // Data rows go after whatever the children declared: a header band reads
+  // naturally as JSX, and the hundred thousand rows under it are just data.
+  for (const row of props.rows ?? []) {
+    rows.push(dataRow(row, rows.length, merges, pictures, theme));
+  }
+
   return {
     name,
     ...(columns.length ? { columns } : {}),
@@ -110,6 +118,62 @@ function toSheet(node: Instance, theme: Theme): IrSheet {
     ...(merges.length ? { merges } : {}),
     ...(props.freeze ? { freeze: props.freeze } : {}),
     ...(pictures.length ? { pictures } : {}),
+  };
+}
+
+/**
+ * One row of the `rows` prop — the same meaning `<Row>` has, read off plain
+ * data instead of a subtree of instances.
+ *
+ * A second reader rather than a second meaning: everything semantic — what a
+ * value's type is, how a class resolves, where a span's merge lands — goes
+ * through the same functions the children form uses, so the two cannot
+ * drift. What this skips is only the scaffolding: no fiber, no `Instance`
+ * and no props object per cell, which is the whole reason the prop exists.
+ */
+function dataRow(
+  row: SheetRow,
+  at: number,
+  merges: IrMerge[],
+  pictures: IrPicture[],
+  theme: Theme,
+): IrRow {
+  const style = styleOf(row, theme);
+  const cells: IrCell[] = [];
+
+  for (const cell of row.cells ?? []) {
+    const column = cells.length;
+    if (cell.image) {
+      pictures.push(toPicture(cell.image, at, column));
+    }
+    if (cell.value !== undefined && cell.formula !== undefined) {
+      throw new Error('a cell holds a value or a formula, and this one was given both');
+    }
+    const cellStyle = styleOf(cell, theme);
+    cells.push({
+      value: contentOf(cell, []),
+      ...(cellStyle ? { style: cellStyle } : {}),
+    });
+
+    const { colSpan = 1, rowSpan = 1 } = cell;
+    if (colSpan > 1 || rowSpan > 1) {
+      merges.push({
+        fromRow: at,
+        fromColumn: column,
+        toRow: at + rowSpan - 1,
+        toColumn: column + colSpan - 1,
+      });
+      for (let i = 1; i < colSpan; i += 1) {
+        cells.push({ value: { t: 'blank' } });
+      }
+    }
+  }
+
+  return {
+    ...(cells.length ? { cells } : {}),
+    ...(row.height !== undefined ? { height: row.height } : {}),
+    ...(style ? { style } : {}),
+    ...(row.filter ? { filter: true } : {}),
   };
 }
 
@@ -151,7 +215,7 @@ function toRow(
     // it names stays blank.
     for (const nested of child.children) {
       if (!isText(nested) && nested.type === 'image') {
-        pictures.push(toPicture(nested, at, column));
+        pictures.push(toPicture(nested.props, at, column));
       }
     }
     cells.push(toCell(child, theme));
@@ -183,15 +247,18 @@ function toRow(
   };
 }
 
-function toPicture(node: Instance, row: number, column: number): IrPicture {
-  const props = node.props as {
+/** From `<Image>`'s props or a data cell's `image` — the two carry the same fields. */
+function toPicture(
+  props: {
     src?: unknown;
     width?: unknown;
     align?: IrPicture['align'];
     valign?: IrPicture['valign'];
     offset?: { x?: number; y?: number };
-  };
-
+  },
+  row: number,
+  column: number,
+): IrPicture {
   const src = String(props.src ?? '');
   if (!src) {
     throw new Error('an <Image> needs a src, which is the name its bytes were handed over under');

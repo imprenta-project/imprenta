@@ -423,13 +423,39 @@ it can:
 | `rounded`, `shadow` | a cell has none of those |
 | `border-8` | Excel has three widths: `border`, `border-2`, `border-4` |
 
+### A hundred thousand rows
+
+A React element per cell is the right way to write a header band and the wrong
+way to write a ledger: the elements and their fibers cost about seven times
+the memory of the rows themselves, thrown away the moment the render ends. So
+`<Sheet>` also takes its body as **plain data** — the same shape `<Row>` and
+`<Cell>` spell out, minus the elements — appended after whatever the children
+declare:
+
+```tsx
+<Sheet name="Diario" rows={apuntes.map((a) => ({
+  cells: [{ value: a.fecha }, { value: a.concepto }, { value: a.importe }],
+}))}>
+  <Column width={12} /><Column width={48} /><Column width={14} format="#,##0.00" />
+</Sheet>
+```
+
+Measured on 200,000 rows of five cells: 916 bytes of heap per row against
+5,885 declared as children, and the host tree builds in 58 ms instead of 891.
+The IR that comes out is identical, byte for byte.
+
 ### From a Node backend
 
 ```ts
-const ir = await toWorkbook(<Ventas lines={lines} />);   // @imprentajs/react/xlsx
-const { xlsx } = await write(ir);                        // @imprentajs/xlsx
+const ir = await render(<Ventas lines={lines} />);   // @imprentajs/react/xlsx — UTF-8 bytes
+const { xlsx } = await write(ir);                    // @imprentajs/xlsx
 res.type('…spreadsheetml.sheet').send(xlsx);
 ```
+
+`render` hands back the workbook as **UTF-8 JSON bytes** rather than one JS
+string — V8 caps a string at 512 MiB of characters and a fourteen-million-cell
+export died there, while serialising, before the writer was involved at all.
+The writer has always read bytes; nothing downstream changes.
 
 `examples/backend` serves both formats from one controller.
 
