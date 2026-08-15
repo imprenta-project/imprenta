@@ -30,8 +30,11 @@ pnpm --filter @imprentajs/xlsx build
 - `Writer` from `@imprentajs/xlsx/writer` — **synchronous**, for when you are
   already off the main thread or in a browser
 
-`ir` is a **JSON string**, and the bytes come back as a `Uint8Array` rather
-than a `Buffer` — see the PDF package's note for why.
+`ir` is the workbook as **JSON — a string or the same JSON as UTF-8 bytes**,
+which is what `@imprentajs/react/xlsx`'s `render` produces; bytes exist
+because V8 caps a string at 512 MiB and a very large workbook got there
+(issue #12). The bytes come back as a `Uint8Array` rather than a `Buffer` —
+see the PDF package's note for why.
 
 ## Rules
 

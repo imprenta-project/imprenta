@@ -19,8 +19,8 @@ export interface BootData {
 
 /** Everything the pool can ask for. One message, one reply, always. */
 export type Request =
-  | { id: number; op: 'write'; ir: string; images?: Image[] }
-  | { id: number; op: 'writeToFile'; ir: string; path: string; images?: Image[] }
+  | { id: number; op: 'write'; ir: string | Uint8Array; images?: Image[] }
+  | { id: number; op: 'writeToFile'; ir: string | Uint8Array; path: string; images?: Image[] }
   | { id: number; op: 'open'; sheets: string; images?: Image[] }
   | { id: number; op: 'rows'; json: string }
   | { id: number; op: 'merge'; json: string }

@@ -64,8 +64,15 @@ function writers(options: WriteOptions = {}): Promise<Pool> {
   return pool;
 }
 
-/** Writes a declared workbook and hands back the bytes. */
-export async function write(ir: string, options?: WriteOptions): Promise<WriteResult> {
+/**
+ * Writes a declared workbook and hands back the bytes.
+ *
+ * `ir` is the workbook as JSON — a string, or the same JSON as UTF-8 bytes,
+ * which is what `@imprentajs/react/xlsx`'s `render` produces. Bytes exist
+ * because V8 caps a string at 512 MiB and a very large workbook got there;
+ * the writer reads both identically.
+ */
+export async function write(ir: string | Uint8Array, options?: WriteOptions): Promise<WriteResult> {
   const reply = await (await writers(options)).run({ op: 'write', ir, images: options?.images });
   return asWrite(reply);
 }
@@ -77,7 +84,7 @@ export async function write(ir: string, options?: WriteOptions): Promise<WriteRe
  * big export never becomes a buffer in the calling thread's heap.
  */
 export async function writeToFile(
-  ir: string,
+  ir: string | Uint8Array,
   path: string,
   options?: WriteOptions,
 ): Promise<FileResult> {
