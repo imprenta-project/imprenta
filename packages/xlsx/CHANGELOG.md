@@ -1,5 +1,45 @@
 # @imprentajs/xlsx
 
+## 0.1.0-alpha.9
+
+### Patch Changes
+
+- [`21cf2e7`](https://github.com/imprenta-project/imprenta/commit/21cf2e701543953e705256140367b97b3a2c32ac) Thanks [@AbianS](https://github.com/AbianS)! - `render` for a workbook hands back UTF-8 bytes, not one JS string.
+
+  V8 caps a string at 512 MiB of characters, and a fourteen-million-cell export
+  died there — while serialising, before the writer was involved at all ([#12](https://github.com/imprenta-project/imprenta/issues/12)).
+  The IR is now stringified in pieces small enough that no single string
+  approaches the cap, each piece encoded as it is made, and the result returned
+  as a `Uint8Array`. The bytes are byte for byte what `JSON.stringify` would
+  have produced — the test asserts equality against the real thing, because
+  "equivalent" is where two serialisers start to drift.
+
+  `write` and `writeToFile` accept the bytes as they always accepted a string —
+  their signatures now say so — so a caller that pipes `render` into `write`
+  changes nothing. A caller that treated the result as a string wraps it in
+  `TextDecoder` or, better, stops needing to.
+
+  Measured end to end: a million declared rows to a finished `.xlsx` in 7.2 s,
+  where the string cap used to end the run before the engine saw a byte.
+
+- [`50a0327`](https://github.com/imprenta-project/imprenta/commit/50a03275da7fc312441bd389518a9b5e6da8a301) Thanks [@AbianS](https://github.com/AbianS)! - A pointer past 2 GiB no longer comes back negative.
+
+  A wasm32 pointer crosses the boundary as an `i32` and JavaScript read it as
+  signed, so once a module's linear memory had grown past 2 GiB every pointer it
+  handed back was negative — and the very next line used it as an offset, which
+  died with "offset is out of bounds". An error about bounds reads like memory
+  corruption and points away from the real cause; it cost an afternoon before
+  anyone found it ([#12](https://github.com/imprenta-project/imprenta/issues/12)).
+
+  Every export is now wrapped once, at instantiation, so its result is read as
+  an unsigned 32-bit value. One place rather than a `>>> 0` at each call site,
+  deliberately: a future export cannot forget. The regression test grows a real
+  instance past the signed line and round-trips a write through it.
+
+  This moves the wall from 2 GiB to wasm32's 4 GiB. What it really buys is the
+  failure mode: a workbook that is merely large now fails, if it fails, with an
+  answer that names the actual limit.
+
 ## 0.1.0-alpha.8
 
 ## 0.1.0-alpha.7

@@ -1,5 +1,51 @@
 # @imprentajs/react
 
+## 0.1.0-alpha.9
+
+### Patch Changes
+
+- [`21cf2e7`](https://github.com/imprenta-project/imprenta/commit/21cf2e701543953e705256140367b97b3a2c32ac) Thanks [@AbianS](https://github.com/AbianS)! - `render` for a workbook hands back UTF-8 bytes, not one JS string.
+
+  V8 caps a string at 512 MiB of characters, and a fourteen-million-cell export
+  died there — while serialising, before the writer was involved at all ([#12](https://github.com/imprenta-project/imprenta/issues/12)).
+  The IR is now stringified in pieces small enough that no single string
+  approaches the cap, each piece encoded as it is made, and the result returned
+  as a `Uint8Array`. The bytes are byte for byte what `JSON.stringify` would
+  have produced — the test asserts equality against the real thing, because
+  "equivalent" is where two serialisers start to drift.
+
+  `write` and `writeToFile` accept the bytes as they always accepted a string —
+  their signatures now say so — so a caller that pipes `render` into `write`
+  changes nothing. A caller that treated the result as a string wraps it in
+  `TextDecoder` or, better, stops needing to.
+
+  Measured end to end: a million declared rows to a finished `.xlsx` in 7.2 s,
+  where the string cap used to end the run before the engine saw a byte.
+
+- [`0f3c256`](https://github.com/imprenta-project/imprenta/commit/0f3c256fa41e7420ecd006c298f93d146cfb716b) Thanks [@AbianS](https://github.com/AbianS)! - A sheet takes its rows as plain data, the way a table already did.
+
+  A React element per cell costs a fiber, an `Instance` and a props object for
+  the duration of one synchronous render — measured at 6,427 bytes of heap per
+  row against the 226 bytes of IR it produces ([#11](https://github.com/imprenta-project/imprenta/issues/11)). `<Sheet>` now also takes a
+  `rows` prop: the same shape `<Row>` and `<Cell>` spell out — typed values,
+  formulas, formats, `className`, spans, anchored images — minus the elements.
+  Data rows are appended after whatever the children declare, so a header band
+  stays JSX and the hundred thousand rows under it are just an array.
+
+  The two forms go through the same functions and produce identical IR; the
+  test holds that line with equality, not similarity.
+
+  Measured on 200,000 rows of five cells:
+
+  |                          | children | `rows` prop |
+  | ------------------------ | -------: | ----------: |
+  | heap after the host tree | 1,177 MB |  **183 MB** |
+  | time to build it         |   891 ms |   **58 ms** |
+  | heap per row             |  5,885 B |   **916 B** |
+
+  Parity with `<Table rows>`, which was the goal, because the table was already
+  shipping.
+
 ## 0.1.0-alpha.8
 
 ### Patch Changes
