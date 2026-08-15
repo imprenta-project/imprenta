@@ -107,16 +107,24 @@ fn ledger(total: bool) -> ir::Document {
     }
 }
 
-/// Peak live bytes while `f` runs, over what was live when it started.
+/// One test at a time, because the counter is the whole process.
 ///
-/// One at a time, because the counter is the whole process: two of these
-/// running at once — which is what `cargo test` does by default — each read
-/// the other's allocations as their own, and the answer comes out somewhere
-/// between "too small to fail" and "large enough to fail on a good day".
-fn peak_of<T>(f: impl FnOnce() -> T) -> (T, usize) {
+/// Held for a test's entire body, not just its measured sections. The gate
+/// used to live inside `peak_of`, which serialised the measurements and
+/// nothing else — and the *unmeasured* half of the other test, building its
+/// six-thousand-row ledger, landed inside whatever window happened to be
+/// open. Allocations made before a window and freed during it push the
+/// baseline down; allocations made and freed inside it push the peak up. So
+/// the first reading came out too small and the second too large, on exactly
+/// the machines where the scheduler interleaves the two tests — which is how
+/// CI failed on a commit that had not moved either number.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
     static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _held = GATE.lock().unwrap_or_else(|e| e.into_inner());
+    GATE.lock().unwrap_or_else(|e| e.into_inner())
+}
 
+/// Peak live bytes while `f` runs, over what was live when it started.
+fn peak_of<T>(f: impl FnOnce() -> T) -> (T, usize) {
     let base = LIVE.load(Relaxed);
     PEAK.store(base, Relaxed);
     let out = f();
@@ -126,6 +134,7 @@ fn peak_of<T>(f: impl FnOnce() -> T) -> (T, usize) {
 
 #[test]
 fn printing_the_page_count_does_not_cost_the_whole_document() {
+    let _lock = serial();
     let assets = Assets::new().with_font(Face::REGULAR, ROBOTO.to_vec());
 
     // The declaration is built before either measurement and dropped after
@@ -158,6 +167,7 @@ fn printing_the_page_count_does_not_cost_the_whole_document() {
 
 #[test]
 fn a_fed_document_that_prints_its_length_keeps_the_rows_and_not_the_pages() {
+    let _lock = serial();
     // The same claim on the streaming side, where it matters most: ContaPro's
     // ledger arrives from a database in batches and is never declared whole.
     //
