@@ -110,13 +110,34 @@ export async function compile(source: WasmSource): Promise<WebAssembly.Module> {
  */
 export async function instantiate(module: WebAssembly.Module): Promise<Exports> {
   const instance = await WebAssembly.instantiate(module, {});
-  const exports = instance.exports as unknown as Exports;
   for (const name of REQUIRED) {
     if (!(name in instance.exports)) {
       throw new Error(`the WebAssembly module is missing ${name}; it is not an Imprenta engine`);
     }
   }
-  return exports;
+  return unsigned(instance.exports);
+}
+
+/**
+ * Every export is wrapped so its result is read as an unsigned 32-bit value.
+ *
+ * A wasm32 pointer crosses as an `i32` and JavaScript reads an `i32` as
+ * signed, so once linear memory grows past 2 GiB every pointer comes back
+ * negative — and the next line uses it as an offset, which throws an error
+ * about bounds that reads like corruption. Wrapping here rather than at each
+ * call site is deliberate: a future export cannot forget. Everything the
+ * module returns is a pointer, a length, a count or a flag, none of which can
+ * meaningfully be negative.
+ */
+function unsigned(exports: WebAssembly.Exports): Exports {
+  const wrapped: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(exports)) {
+    wrapped[name] =
+      typeof value === 'function'
+        ? (...args: number[]) => (value as (...args: number[]) => number)(...args) >>> 0
+        : value;
+  }
+  return wrapped as unknown as Exports;
 }
 
 /**
