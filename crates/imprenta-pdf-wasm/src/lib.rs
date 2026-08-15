@@ -29,7 +29,8 @@
 //! - Every call returns `1` for success and `0` for failure, and a failure
 //!   leaves a message at [`imprenta_error_ptr`]. Nothing panics across the boundary:
 //!   a malformed document is an error the host can print, not a dead instance.
-//! - The result is read with [`imprenta_out_ptr`]/[`imprenta_out_len`] and given back with
+//! - The result is read block by block with [`imprenta_out_blocks`]/[`imprenta_out_block_ptr`]/
+//!   [`imprenta_out_block_len`] and given back with
 //!   [`imprenta_out_release`], so a long-lived instance does not sit on the last PDF it
 //!   produced. The pointer is only good until the next allocation grows the
 //!   memory, which is why the JavaScript binding copies rather than handing a
@@ -56,7 +57,7 @@ thread_local! {
     };
     /// The finished document, kept until the host has read it or released it.
     static OUT: RefCell<Outcome> = const {
-        RefCell::new(Outcome { pdf: Vec::new(), pages: 0, diagnostics: Vec::new() })
+        RefCell::new(Outcome { pdf: imprenta_pdf::Pdf::empty(), pages: 0, diagnostics: Vec::new() })
     };
     /// The diagnostics, as the JSON array the host reads.
     static DIAGNOSTICS: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -218,7 +219,7 @@ pub unsafe extern "C" fn imprenta_assets_image(
 
 // ── One document, declared whole ────────────────────────────────────────────
 
-/// Renders a declared document. Read the result with [`imprenta_out_ptr`].
+/// Renders a declared document. Read the result with [`imprenta_out_block_ptr`].
 ///
 /// # Safety
 ///
@@ -251,7 +252,7 @@ pub unsafe extern "C" fn imprenta_render(ir_ptr: *const u8, ir_len: usize) -> i3
 // exists and why it packs rather than estimating.
 
 /// Measures a run of table rows, keeps them, and hands back one height each
-/// as little-endian `f32` readable with [`imprenta_out_ptr`].
+/// as little-endian `f32` readable with [`imprenta_out_block_ptr`].
 ///
 /// Only the heights cross: four bytes a row, against the kilobytes the row
 /// itself weighs. The rows stay here for [`imprenta_fragment_measured`], which
@@ -302,7 +303,8 @@ pub unsafe extern "C" fn imprenta_measure_rows(
             MEASURED.with(|slot| *slot.borrow_mut() = rows);
             OUT.with(|slot| {
                 let mut held = slot.borrow_mut();
-                held.pdf = out;
+                // Already contiguous, so it crosses as one block.
+                held.pdf = out.into();
                 held.pages = count;
                 held.diagnostics = Vec::new();
             });
@@ -445,7 +447,8 @@ pub unsafe extern "C" fn imprenta_plan(
             OUT.with(|slot| {
                 let mut held = slot.borrow_mut();
                 held.pages = json.len();
-                held.pdf = bytes;
+                // Already contiguous, so it crosses as one block.
+                held.pdf = bytes.into();
                 held.diagnostics = Vec::new();
             });
             succeed()
@@ -473,7 +476,7 @@ pub unsafe extern "C" fn imprenta_merge_push(ptr: *const u8, len: usize) -> i32 
     succeed()
 }
 
-/// Merges what was pushed and publishes the file at [`imprenta_out_ptr`].
+/// Merges what was pushed and publishes the file at [`imprenta_out_block_ptr`].
 #[unsafe(no_mangle)]
 pub extern "C" fn imprenta_merge_finish() -> i32 {
     let fragments = FRAGMENTS.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
@@ -484,7 +487,7 @@ pub extern "C" fn imprenta_merge_finish() -> i32 {
             // caught here rather than by whoever opens the document.
             let pages = merge::pages_in(&pdf).unwrap_or(0);
             publish(Outcome {
-                pdf,
+                pdf: pdf.into(),
                 pages,
                 diagnostics: Vec::new(),
             })
@@ -563,7 +566,7 @@ pub extern "C" fn imprenta_stream_pending() -> usize {
     PRINTER.with(|slot| slot.borrow().as_ref().map_or(0, Printer::pending))
 }
 
-/// Paints what is left and closes the document. Read it with [`imprenta_out_ptr`].
+/// Paints what is left and closes the document. Read it with [`imprenta_out_block_ptr`].
 #[unsafe(no_mangle)]
 pub extern "C" fn imprenta_stream_finish() -> i32 {
     let printer = PRINTER.with(|slot| slot.borrow_mut().take());
@@ -578,14 +581,35 @@ pub extern "C" fn imprenta_stream_finish() -> i32 {
 
 // ── Reading the result ──────────────────────────────────────────────────────
 
+/// How many pieces the result is in. Read them with
+/// [`imprenta_out_block_ptr`] and [`imprenta_out_block_len`]; concatenated in
+/// order they are the file.
+///
+/// Blocks rather than one buffer, deliberately: handing back a contiguous
+/// result meant joining the writer's blocks inside linear memory, which held
+/// two copies of the finished document at the peak — and linear memory never
+/// shrinks, so the peak was the footprint (issue #7). The host assembles the
+/// copy on its own heap, where the memory goes back.
 #[unsafe(no_mangle)]
-pub extern "C" fn imprenta_out_ptr() -> *const u8 {
-    OUT.with(|slot| slot.borrow().pdf.as_ptr())
+pub extern "C" fn imprenta_out_blocks() -> usize {
+    OUT.with(|slot| slot.borrow().pdf.block_count())
 }
 
+/// Where the `index`-th piece starts. Null past the end, never a trap.
 #[unsafe(no_mangle)]
-pub extern "C" fn imprenta_out_len() -> usize {
-    OUT.with(|slot| slot.borrow().pdf.len())
+pub extern "C" fn imprenta_out_block_ptr(index: usize) -> *const u8 {
+    OUT.with(|slot| {
+        slot.borrow()
+            .pdf
+            .block(index)
+            .map_or(std::ptr::null(), <[u8]>::as_ptr)
+    })
+}
+
+/// How long the `index`-th piece is. Zero past the end.
+#[unsafe(no_mangle)]
+pub extern "C" fn imprenta_out_block_len(index: usize) -> usize {
+    OUT.with(|slot| slot.borrow().pdf.block(index).map_or(0, <[u8]>::len))
 }
 
 #[unsafe(no_mangle)]
@@ -625,7 +649,7 @@ pub extern "C" fn imprenta_error_len() -> usize {
 pub extern "C" fn imprenta_out_release() -> i32 {
     OUT.with(|slot| {
         let mut out = slot.borrow_mut();
-        out.pdf = Vec::new();
+        out.pdf = imprenta_pdf::Pdf::empty();
         out.pages = 0;
         out.diagnostics = Vec::new();
     });
@@ -669,8 +693,25 @@ mod tests {
         give_back(data);
     }
 
+    /// The result as the host assembles it: the blocks, in order.
     fn read_out() -> Vec<u8> {
-        unsafe { std::slice::from_raw_parts(imprenta_out_ptr(), imprenta_out_len()) }.to_vec()
+        let mut out = Vec::with_capacity(out_len());
+        for index in 0..imprenta_out_blocks() {
+            out.extend_from_slice(unsafe {
+                std::slice::from_raw_parts(
+                    imprenta_out_block_ptr(index),
+                    imprenta_out_block_len(index),
+                )
+            });
+        }
+        out
+    }
+
+    /// The total the blocks add up to, which is what `out_len` used to say.
+    fn out_len() -> usize {
+        (0..imprenta_out_blocks())
+            .map(|index| imprenta_out_block_len(index))
+            .sum()
     }
 
     fn read_error() -> String {
@@ -816,16 +857,35 @@ mod tests {
     }
 
     #[test]
+    fn a_block_index_past_the_end_is_null_and_zero_rather_than_a_trap() {
+        // The index arrives over the boundary, where a panic kills the
+        // instance. A host that miscounts must get an answer it can check.
+        let _lock = guard();
+        load_roman();
+        let ir = put(HELLO);
+        unsafe { imprenta_render(ir.0, ir.1) };
+        let count = imprenta_out_blocks();
+
+        assert!(count >= 1);
+        assert!(imprenta_out_block_ptr(count).is_null());
+        assert_eq!(imprenta_out_block_len(count), 0);
+
+        imprenta_out_release();
+        give_back(ir);
+    }
+
+    #[test]
     fn releasing_the_result_gives_the_bytes_back() {
         let _lock = guard();
         load_roman();
         let ir = put(HELLO);
         unsafe { imprenta_render(ir.0, ir.1) };
-        assert!(imprenta_out_len() > 0);
+        assert!(out_len() > 0);
 
         imprenta_out_release();
 
-        assert_eq!(imprenta_out_len(), 0);
+        assert_eq!(out_len(), 0);
+        assert_eq!(imprenta_out_blocks(), 0);
         assert_eq!(imprenta_out_pages(), 0);
         assert_eq!(imprenta_diagnostics_len(), 0);
         give_back(ir);

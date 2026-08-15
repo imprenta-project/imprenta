@@ -63,6 +63,15 @@ helpers wraps it, which costs nothing because a `Buffer` *is* a `Uint8Array`.
 - **Release the result.** `collect()` calls `imprenta_out_release` as soon as it
   has read. WebAssembly memory never goes back to the host, so an instance that
   kept its last PDF would hold the largest one it ever made.
+- **The result crosses in blocks, never as one buffer.** The writer produces
+  the file in blocks that are never moved, and the module hands exactly those
+  across — `imprenta_out_blocks` / `imprenta_out_block_ptr` /
+  `imprenta_out_block_len` — because joining them in linear memory held two
+  copies of the file at the peak, and the peak is permanent (issue #7:
+  68.0 → 47.2 MB on a 21.78 MB, 10,680-page ledger). `Memory.readOutput`
+  assembles the one contiguous copy on the JS heap, where memory goes back;
+  `renderToFile` never assembles at all — the worker writes block by block, so
+  a long document exists whole nowhere but on disk.
 - **And release the instance.** Releasing the PDF gives the module back its
   bytes; it does not give the *host* back anything, because there is no
   instruction to shrink a linear memory. An engine's footprint is the

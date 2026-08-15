@@ -186,7 +186,7 @@ mod tests {
             r#"{{"page":{{"width":595,"height":842}},"children":[{{"t":"table","columns":[{{"width":{{"unit":"percent","value":0.6}}}},{{"width":{{"unit":"percent","value":0.4}}}}],"rows":[{}]}}]}}"#,
             rows.join(",")
         );
-        run(ir.as_bytes(), &roman()).unwrap().pdf
+        run(ir.as_bytes(), &roman()).unwrap().pdf.into_vec()
     }
 
     fn pages_of(pdf: &[u8]) -> usize {

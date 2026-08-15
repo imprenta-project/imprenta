@@ -55,7 +55,7 @@ fn glyphs(text: &str, size: f32) -> Vec<Glyph> {
 }
 
 /// A one-page document with `text` on it.
-fn one_page(text: &str, settings: Settings) -> Vec<u8> {
+fn one_page(text: &str, settings: Settings) -> imprenta_pdf_write::Pdf {
     let mut writer = Writer::new(settings);
     let face = writer.add_face(ROBOTO.to_vec()).unwrap();
     let mut page = writer.page(595.0, 842.0);

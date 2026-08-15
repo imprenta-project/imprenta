@@ -80,9 +80,14 @@ pub struct PagePlan {
 }
 
 /// A finished document and what each of its pages totalled.
+///
+/// The file is a [`imprenta_pdf_write::Pdf`] — still in its blocks, joined
+/// only for a consumer that dereferences it. The wasm boundary reads the
+/// blocks as they lie, which is what keeps the module's peak at one copy of
+/// the file rather than two.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Composed {
-    pub pdf: Vec<u8>,
+    pub pdf: imprenta_pdf_write::Pdf,
     pub totals: Vec<PageTotals>,
 }
 

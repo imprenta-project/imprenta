@@ -52,8 +52,9 @@ export interface Exports {
   imprenta_stream_close_table(): number;
   imprenta_stream_pending(): number;
   imprenta_stream_finish(): number;
-  imprenta_out_ptr(): number;
-  imprenta_out_len(): number;
+  imprenta_out_blocks(): number;
+  imprenta_out_block_ptr(index: number): number;
+  imprenta_out_block_len(index: number): number;
   imprenta_out_pages(): number;
   imprenta_out_release(): number;
   imprenta_diagnostics_ptr(): number;
@@ -84,8 +85,9 @@ const REQUIRED = [
   'imprenta_stream_close_table',
   'imprenta_stream_pending',
   'imprenta_stream_finish',
-  'imprenta_out_ptr',
-  'imprenta_out_len',
+  'imprenta_out_blocks',
+  'imprenta_out_block_ptr',
+  'imprenta_out_block_len',
   'imprenta_out_pages',
   'imprenta_out_release',
   'imprenta_diagnostics_ptr',
@@ -181,6 +183,53 @@ export class Memory {
   readText(ptr: number, len: number): string {
     if (len === 0) return '';
     return decoder.decode(new Uint8Array(this.e.memory.buffer, ptr, len));
+  }
+
+  /**
+   * The module's result, assembled from its blocks into one copy.
+   *
+   * The engine finishes a document in pieces and hands them over as pieces —
+   * joining them inside linear memory would hold two copies of the file at
+   * the peak, and linear memory never shrinks (issue #7). The one contiguous
+   * copy is made here, on a heap that gives memory back.
+   */
+  readOutput(): Uint8Array {
+    const count = this.e.imprenta_out_blocks();
+    let total = 0;
+    for (let i = 0; i < count; i++) total += this.e.imprenta_out_block_len(i);
+    const out = new Uint8Array(total);
+    let at = 0;
+    for (let i = 0; i < count; i++) {
+      const len = this.e.imprenta_out_block_len(i);
+      out.set(new Uint8Array(this.e.memory.buffer, this.e.imprenta_out_block_ptr(i), len), at);
+      at += len;
+    }
+    return out;
+  }
+
+  readOutputText(): string {
+    const bytes = this.readOutput();
+    return bytes.length === 0 ? '' : decoder.decode(bytes);
+  }
+
+  /**
+   * The module's result, one block at a time, never assembled.
+   *
+   * For the caller whose destination takes pieces — a file, a socket — so the
+   * document never exists whole on this side of the boundary either. Each
+   * chunk is a view into the module's memory: use it before the callback
+   * returns and never call into the module while holding one, because any
+   * allocation can grow the memory and detach it.
+   */
+  eachOutputBlock(sink: (chunk: Uint8Array) => void): number {
+    const count = this.e.imprenta_out_blocks();
+    let total = 0;
+    for (let i = 0; i < count; i++) {
+      const len = this.e.imprenta_out_block_len(i);
+      sink(new Uint8Array(this.e.memory.buffer, this.e.imprenta_out_block_ptr(i), len));
+      total += len;
+    }
+    return total;
   }
 }
 

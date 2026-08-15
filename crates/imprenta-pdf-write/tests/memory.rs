@@ -94,10 +94,11 @@ fn ledger(pages: usize) -> (usize, usize) {
     (peak, size)
 }
 
+// One at a time: the counter is the whole process.
+static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn a_finished_page_costs_its_bytes_and_nothing_else() {
-    // One at a time: the counter is the whole process.
-    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _held = GATE.lock().unwrap_or_else(|e| e.into_inner());
 
     let (small_peak, small_size) = ledger(200);
@@ -119,5 +120,27 @@ fn a_finished_page_costs_its_bytes_and_nothing_else() {
         "ten times the pages cost {:.2}× the file where two hundred cost {:.2}×",
         overhead(large_peak, large_size),
         overhead(small_peak, small_size),
+    );
+}
+
+#[test]
+fn finishing_holds_one_copy_of_the_file_and_not_two() {
+    let _held = GATE.lock().unwrap_or_else(|e| e.into_inner());
+
+    // The join that used to close `finish` was the last place the writer held
+    // a document twice, and it is gone: the file comes back still in its
+    // blocks (issue #7). The peak over a large ledger is therefore the file
+    // plus the working set, and must never approach the two-copies line the
+    // old `into_vec` sat on. Large deliberately: blocks double up to their
+    // ceiling, so a small file's *capacity* can near twice its content and
+    // would hide the join behind the same ratio — at six thousand pages the
+    // overshoot is one part-filled block and the claim is measurable.
+    let (peak, size) = ledger(6_000);
+
+    assert!(
+        (peak as f64) < size as f64 * 1.5,
+        "6 000 pages peaked at {:.1} MB for a {:.1} MB file, which is two copies, not one",
+        peak as f64 / 1e6,
+        size as f64 / 1e6,
     );
 }

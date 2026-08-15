@@ -117,10 +117,29 @@ async function main(): Promise<void> {
    * becomes a 128 MB Buffer in the main thread's heap on its way to disk.
    * The native addon wrote it from Rust; a worker is the same guarantee, one
    * boundary further out.
+   *
+   * Block by block, synchronously: the engine hands the file over in the
+   * pieces it was written in, each goes to the descriptor before the next is
+   * read, and the document never exists whole on this side of the boundary —
+   * not in linear memory, not on this heap. Synchronous writes are right
+   * here: this thread exists to block, and an `await` between blocks would
+   * mean copying each one out of the module's memory first.
    */
-  const toFile = async (bytes: Uint8Array, path: string) => {
-    const { writeFile } = await import('node:fs/promises');
-    await writeFile(path, bytes);
+  const toFile = async (
+    path: string,
+    produce: (sink: (chunk: Uint8Array) => void) => {
+      pages: number;
+      bytes: number;
+      diagnostics: string[];
+    },
+  ) => {
+    const fs = await import('node:fs');
+    const fd = fs.openSync(path, 'w');
+    try {
+      return produce((chunk) => fs.writeSync(fd, chunk));
+    } finally {
+      fs.closeSync(fd);
+    }
   };
 
   port.on('message', async (request: Request) => {
@@ -139,8 +158,7 @@ async function main(): Promise<void> {
           return;
         }
         case 'renderToFile': {
-          const out = engine.render(request.ir);
-          await toFile(out.pdf, request.path);
+          const out = await toFile(request.path, (sink) => engine.renderTo(request.ir, sink));
           port.postMessage({
             id: request.id,
             path: request.path,
@@ -232,10 +250,10 @@ async function main(): Promise<void> {
         }
         case 'finish': {
           if (!printer) throw new Error('no document is open');
-          const out = printer.finish();
-          printer = null;
           if (request.path) {
-            await toFile(out.pdf, request.path);
+            const open = printer;
+            printer = null;
+            const out = await toFile(request.path, (sink) => open.finishTo(sink));
             port.postMessage({
               id: request.id,
               path: request.path,
@@ -244,6 +262,8 @@ async function main(): Promise<void> {
               diagnostics: out.diagnostics,
             });
           } else {
+            const out = printer.finish();
+            printer = null;
             const buffer = out.pdf.buffer as ArrayBuffer;
             port.postMessage(
               { id: request.id, pdf: buffer, pages: out.pages, diagnostics: out.diagnostics },

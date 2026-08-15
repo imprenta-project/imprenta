@@ -30,17 +30,43 @@ const CEILING: usize = 4 * 1024 * 1024;
 /// The first block, and the smallest anything costs.
 const FLOOR: usize = 8 * 1024;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct Blocks {
     blocks: Vec<Vec<u8>>,
     len: usize,
 }
 
 impl Blocks {
+    /// Nothing written. `const` so a thread-local on the far side of the wasm
+    /// boundary can start with one without a lazy initialiser.
+    pub const fn empty() -> Self {
+        Self {
+            blocks: Vec::new(),
+            len: 0,
+        }
+    }
+
     /// How many bytes have been written in all. This is the offset the next
     /// object will start at, which is what an xref entry records.
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    /// How many pieces the file is in.
+    pub fn count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// One piece, by position. `None` past the end rather than a panic,
+    /// because the index arrives over the wasm boundary where a panic is a
+    /// trap that takes the instance with it.
+    pub fn get(&self, index: usize) -> Option<&[u8]> {
+        self.blocks.get(index).map(Vec::as_slice)
+    }
+
+    /// The pieces in file order. Concatenated, they are the file.
+    pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
+        self.blocks.iter().map(Vec::as_slice)
     }
 
     pub fn push(&mut self, bytes: &[u8]) {

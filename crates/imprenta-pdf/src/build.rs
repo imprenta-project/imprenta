@@ -76,7 +76,10 @@ impl Assets {
 /// A rendered document and everything the engine noticed on the way.
 #[derive(Debug, Clone)]
 pub struct Built {
-    pub pdf: Vec<u8>,
+    /// The file, still in the blocks it was written into. Reads like the
+    /// `Vec<u8>` it replaced — index it, scan it, compare it — and joins into
+    /// one buffer only when somebody does; `into_vec()` for ownership.
+    pub pdf: imprenta_pdf_write::Pdf,
     pub pages: usize,
     /// Problems worth telling the author about — clipped text, a missing
     /// glyph, an image that could not be read.
@@ -3030,6 +3033,7 @@ mod page_bands {
         )
         .unwrap()
         .pdf
+        .into_vec()
     }
 
     #[test]

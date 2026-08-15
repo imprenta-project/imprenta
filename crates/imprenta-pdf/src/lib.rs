@@ -1,5 +1,10 @@
 //! The Imprenta PDF engine.
 
+/// The finished file as [`build::Built`] and [`compose::Composed`] carry it:
+/// blocks that read like the `Vec<u8>` they replaced, joined only on demand.
+/// Re-exported so a consumer of this crate never has to name the writer.
+pub use imprenta_pdf_write::Pdf;
+
 pub mod atom;
 pub mod build;
 pub mod compose;

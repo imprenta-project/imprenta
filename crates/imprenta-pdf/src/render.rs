@@ -167,7 +167,9 @@ fn render_inner(
     for page in pages {
         sink.paint_page(page, contents, fonts, 0);
     }
-    sink.finish()
+    // One buffer for these direct callers, which are the native convenience
+    // paths; the composer keeps the blocks and lets its consumer decide.
+    sink.finish().map(imprenta_pdf_write::Pdf::into_vec)
 }
 
 /// Paints pages into one PDF, one at a time.
@@ -305,7 +307,7 @@ impl PageSink {
         self.pages
     }
 
-    pub fn finish(self) -> Result<Vec<u8>, RenderError> {
+    pub fn finish(self) -> Result<imprenta_pdf_write::Pdf, RenderError> {
         if self.pages == 0 {
             return Err(RenderError::Serialise(
                 "a PDF must have at least one page".into(),

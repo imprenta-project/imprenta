@@ -131,7 +131,7 @@ export class Engine {
     const r = this.memory.writeText(rows);
     try {
       check(this.e, this.memory, this.e.imprenta_measure_rows(s[0], s[1], h[0], h[1], r[0], r[1]));
-      const out = this.memory.read(this.e.imprenta_out_ptr(), this.e.imprenta_out_len());
+      const out = this.memory.readOutput();
       this.e.imprenta_out_release();
       return out;
     } finally {
@@ -182,7 +182,7 @@ export class Engine {
     const h = this.memory.write(heights);
     try {
       check(this.e, this.memory, this.e.imprenta_plan(s[0], s[1], h[0], h[1]));
-      const out = this.memory.readText(this.e.imprenta_out_ptr(), this.e.imprenta_out_len());
+      const out = this.memory.readOutputText();
       this.e.imprenta_out_release();
       return out;
     } finally {
@@ -214,7 +214,12 @@ export class Engine {
     } finally {
       this.memory.free(input);
     }
-    return new Printer(this.e, this.memory, () => this.collect());
+    return new Printer(
+      this.e,
+      this.memory,
+      () => this.collect(),
+      (sink) => this.collectTo(sink),
+    );
   }
 
   /**
@@ -268,9 +273,40 @@ export class Engine {
     }
   }
 
+  /**
+   * Renders a declared document straight into `sink`, block by block.
+   *
+   * For the caller whose destination takes pieces — a file above all — so the
+   * document never exists whole in linear memory *or* on this heap. Each
+   * chunk is a view into the module's memory, valid only until the callback
+   * returns; write it or copy it, never keep it.
+   */
+  renderTo(ir: string | Uint8Array, sink: (chunk: Uint8Array) => void): Omit<RenderResult, 'pdf'> {
+    const input = typeof ir === 'string' ? this.memory.writeText(ir) : this.memory.write(ir);
+    try {
+      check(this.e, this.memory, this.e.imprenta_render(input[0], input[1]));
+      return this.collectTo(sink);
+    } finally {
+      this.memory.free(input);
+    }
+  }
+
+  /** As {@link renderTo}, reading whatever result the module is holding. */
+  collectTo(sink: (chunk: Uint8Array) => void): Omit<RenderResult, 'pdf'> {
+    const bytes = this.memory.eachOutputBlock(sink);
+    const pages = this.e.imprenta_out_pages();
+    const reported = this.memory.readText(
+      this.e.imprenta_diagnostics_ptr(),
+      this.e.imprenta_diagnostics_len(),
+    );
+    const diagnostics: string[] = reported ? JSON.parse(reported) : [];
+    this.e.imprenta_out_release();
+    return { pages, bytes, diagnostics };
+  }
+
   /** Reads the finished document and gives the module its bytes back. */
   private collect(): RenderResult {
-    const pdf = this.memory.read(this.e.imprenta_out_ptr(), this.e.imprenta_out_len());
+    const pdf = this.memory.readOutput();
     const pages = this.e.imprenta_out_pages();
     const reported = this.memory.readText(
       this.e.imprenta_diagnostics_ptr(),
@@ -305,6 +341,7 @@ export class Printer {
     private readonly e: Exports,
     private readonly memory: Memory,
     private readonly collect: () => RenderResult,
+    private readonly collectTo: (sink: (chunk: Uint8Array) => void) => Omit<RenderResult, 'pdf'>,
   ) {}
 
   /** Adds a batch of nodes — headings, paragraphs, whole short tables. */
@@ -350,6 +387,21 @@ export class Printer {
     this.open = false;
     check(this.e, this.memory, this.e.imprenta_stream_finish());
     return this.collect();
+  }
+
+  /**
+   * As {@link finish}, straight into `sink`, block by block.
+   *
+   * The streamed document's last leg: the caller never held the rows, and
+   * with this the finished file never exists whole either — not in linear
+   * memory, not on this heap. Each chunk is a view into the module's memory,
+   * valid only until the callback returns.
+   */
+  finishTo(sink: (chunk: Uint8Array) => void): Omit<RenderResult, 'pdf'> {
+    this.ensureOpen();
+    this.open = false;
+    check(this.e, this.memory, this.e.imprenta_stream_finish());
+    return this.collectTo(sink);
   }
 
   private send(call: (ptr: number, len: number) => number, json: string): void {

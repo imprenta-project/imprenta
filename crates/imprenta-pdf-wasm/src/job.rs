@@ -27,9 +27,15 @@ pub struct ImageInput {
 }
 
 /// What came of a render.
+///
+/// The file stays in the blocks the writer produced — see
+/// [`imprenta_pdf::Pdf`] — and the host reads them one at a time
+/// through `imprenta_out_block_ptr`. Joining them here would put a second
+/// copy of the document in linear memory, which never shrinks, at exactly the
+/// moment the first is at its largest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
-    pub pdf: Vec<u8>,
+    pub pdf: imprenta_pdf::Pdf,
     pub pages: usize,
     pub diagnostics: Vec<String>,
 }

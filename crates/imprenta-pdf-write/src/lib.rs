@@ -43,9 +43,11 @@
 mod blocks;
 mod font;
 mod image;
+mod pdf;
 
 use blocks::Blocks;
 use imprenta_core::color::Color;
+pub use pdf::Pdf;
 use pdf_writer::{Chunk, Content, Finish, Name, Rect, Ref, Str};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -225,7 +227,12 @@ impl Writer {
 
     /// Writes the fonts, the images, the page tree and the catalogue, then
     /// the cross-reference table.
-    pub fn finish(mut self) -> Result<Vec<u8>, WriteError> {
+    ///
+    /// What comes back is the file still in its blocks — see [`Pdf`]. A
+    /// caller that wants one buffer dereferences or calls
+    /// [`Pdf::into_vec`]; the wasm boundary and a file sink take the blocks
+    /// as they lie and never pay for the join.
+    pub fn finish(mut self) -> Result<Pdf, WriteError> {
         if self.page_refs.is_empty() {
             return Err(WriteError::NoPages);
         }
@@ -304,7 +311,7 @@ impl Writer {
     ///
     /// Written by hand because everything above it has been: the offsets are
     /// this writer's own, and a table entry is twenty bytes.
-    fn trailer(mut self, catalog: Ref) -> Vec<u8> {
+    fn trailer(mut self, catalog: Ref) -> Pdf {
         self.offsets.sort_unstable();
         let size = 1 + self.offsets.last().map_or(0, |(id, _)| *id);
         let start = self.blocks.len();
@@ -329,7 +336,10 @@ impl Writer {
         ));
         self.blocks.push(table.as_bytes());
 
-        self.blocks.into_vec()
+        // Not joined here, deliberately. This was the last place the engine
+        // held a document twice, and inside a WebAssembly module that peak is
+        // permanent; whoever needs the file contiguous pays for it there.
+        Pdf::from_blocks(self.blocks)
     }
 }
 
