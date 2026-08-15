@@ -1,5 +1,46 @@
 # @imprentajs/pdf
 
+## 0.1.0-alpha.9
+
+### Patch Changes
+
+- [`50a0327`](https://github.com/imprenta-project/imprenta/commit/50a03275da7fc312441bd389518a9b5e6da8a301) Thanks [@AbianS](https://github.com/AbianS)! - A pointer past 2 GiB no longer comes back negative.
+
+  A wasm32 pointer crosses the boundary as an `i32` and JavaScript read it as
+  signed, so once a module's linear memory had grown past 2 GiB every pointer it
+  handed back was negative — and the very next line used it as an offset, which
+  died with "offset is out of bounds". An error about bounds reads like memory
+  corruption and points away from the real cause; it cost an afternoon before
+  anyone found it ([#12](https://github.com/imprenta-project/imprenta/issues/12)).
+
+  Every export is now wrapped once, at instantiation, so its result is read as
+  an unsigned 32-bit value. One place rather than a `>>> 0` at each call site,
+  deliberately: a future export cannot forget. The regression test grows a real
+  instance past the signed line and round-trips a write through it.
+
+  This moves the wall from 2 GiB to wasm32's 4 GiB. What it really buys is the
+  failure mode: a workbook that is merely large now fails, if it fails, with an
+  answer that names the actual limit.
+
+- [`6a94570`](https://github.com/imprenta-project/imprenta/commit/6a94570ae7f65611592ff47dc250d353911dd515) Thanks [@AbianS](https://github.com/AbianS)! - The finished PDF crosses the wasm boundary in blocks, never as one buffer.
+
+  The writer has always produced the file in blocks that are never moved; the
+  join that made them contiguous for `imprenta_out_ptr` was the last place the
+  engine held a document twice — and linear memory never shrinks, so that peak
+  was the footprint ([#7](https://github.com/imprenta-project/imprenta/issues/7)). The module now hands over exactly the blocks the
+  writer produced, through `imprenta_out_blocks` / `imprenta_out_block_ptr` /
+  `imprenta_out_block_len`, and the one contiguous copy is assembled on the JS
+  heap, where memory goes back.
+
+  `renderToFile` no longer assembles at all: the worker writes block by block,
+  so a long document exists whole nowhere but on disk — not in linear memory,
+  not in the Node heap. That was the real reason to want this.
+
+  The output is byte for byte what it was; the equivalence tests still compare
+  bytes and still pass. Measured on a 10,680-page ledger producing a 21.78 MB
+  file: **68.0 → 47.2 MB** of linear memory. The saving is the size of the
+  file, so it grows with the document.
+
 ## 0.1.0-alpha.8
 
 ### Patch Changes

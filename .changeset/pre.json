@@ -13,6 +13,7 @@
     "a-cell-over-two-columns",
     "a-header-that-filters",
     "a-logo-in-a-spreadsheet",
+    "a-workbook-as-bytes",
     "aligned-paragraphs",
     "bands-on-every-released-page",
     "give-the-memory-back",
@@ -22,9 +23,12 @@
     "olive-hounds-repeat",
     "our-own-pdf-writer",
     "page-count-without-holding-the-document",
+    "pointers-past-two-gigabytes",
     "quiet-moons-repeat",
+    "rows-as-data",
     "table-rows-styled",
     "text-that-overflows",
+    "the-file-crosses-in-blocks",
     "tidy-rows-stand",
     "tounicode-across-a-style-change"
   ]
