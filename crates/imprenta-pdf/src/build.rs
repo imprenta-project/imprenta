@@ -90,8 +90,6 @@ pub struct Built {
 pub enum BuildError {
     #[error("the document declares no fonts")]
     NoFonts,
-    #[error("unknown asset {0:?}")]
-    UnknownAsset(String),
     #[error(transparent)]
     Render(#[from] RenderError),
     #[error("{0}")]
@@ -187,7 +185,7 @@ pub fn build(
             band,
         };
         for node in &document.children {
-            ctx.node(node, width)?;
+            ctx.node(node, width);
         }
     }
 
@@ -249,7 +247,7 @@ fn count_pages(
             band,
         };
         for node in &document.children {
-            ctx.node(node, width)?;
+            ctx.node(node, width);
         }
     }
     Ok(composer.count())
@@ -426,11 +424,13 @@ impl BandAssets<'_> {
             diagnostics: self.diagnostics,
         };
         let mut boxed = BoxContent::default().with_width(self.width);
+        // Nothing here can refuse the band. Composing reports what it could
+        // not build and leaves that piece out, which is the only shape that
+        // works for a band: one composed as a whole used to be dropped whole,
+        // so a logo nobody handed over cost every page its title, its number
+        // and its customer, silently. One picture short is one picture short.
         for node in &filled {
-            match compose.inline(node, self.width) {
-                Ok(content) => boxed = boxed.stack(content),
-                Err(_) => return None,
-            }
+            boxed = boxed.stack(compose.inline(node, self.width));
         }
         Some(Content::Box(boxed))
     }
@@ -584,21 +584,43 @@ impl Compose<'_> {
             })
             .collect()
     }
-    fn image_content(&mut self, src: &str, width: Pt) -> Result<ImageContent, BuildError> {
-        let asset = self
-            .assets
-            .images
-            .get(src)
-            .ok_or_else(|| BuildError::UnknownAsset(src.to_string()))?;
-        Ok(ImageContent::scaled_to_width(
+    /// The image a node names, or nothing when it was never handed over.
+    ///
+    /// Reported rather than refused. A picture is one thing on the page and
+    /// the page is not a reason to lose, least of all inside a band: a band is
+    /// composed as one piece and would take the running header down with it.
+    /// The producer hears about it as an error diagnostic, which the dev
+    /// server shows and CI can refuse.
+    fn image_content(&mut self, src: &str, width: Pt) -> Option<ImageContent> {
+        let Some(asset) = self.assets.images.get(src) else {
+            self.diagnostics.report(
+                imprenta_core::diagnostic::Diagnostic::error(
+                    "unknown-image",
+                    format!(
+                        "a node names the image {src:?}, and no image of that name was handed over"
+                    ),
+                )
+                .with_hint("hand the bytes over beside the document, under that name"),
+            );
+            return None;
+        };
+        Some(ImageContent::scaled_to_width(
             std::sync::Arc::clone(&asset.bytes),
             asset.format,
             asset.pixels,
             width,
         ))
     }
-    fn inline(&mut self, node: &ir::Node, width: Pt) -> Result<Content, BuildError> {
-        Ok(match node {
+    /// A node as one piece of content, always.
+    ///
+    /// Infallible on purpose, and it is the bands that make it so: a band is
+    /// composed as a single piece and painted onto every page, so anything
+    /// that could refuse here would take a running header down with it rather
+    /// than lose the one node it was about. What cannot be built is reported
+    /// as a diagnostic and comes back [`Content::Empty`] — the author hears
+    /// about it and the page around it still prints.
+    fn inline(&mut self, node: &ir::Node, width: Pt) -> Content {
+        match node {
             ir::Node::Text(text) => {
                 let shaped = self.runs(&text.runs, text.style);
                 // The space below is padding here rather than a spacer atom:
@@ -619,7 +641,9 @@ impl Compose<'_> {
                 }
                 Content::Box(boxed)
             }
-            ir::Node::Image(image) => Content::Image(self.image_content(&image.src, image.width)?),
+            ir::Node::Image(image) => self
+                .image_content(&image.src, image.width)
+                .map_or(Content::Empty, Content::Image),
             ir::Node::Canvas(canvas) => Content::Canvas(canvas_content(canvas)),
             ir::Node::Spacer(spacer) => {
                 if spacer.grow {
@@ -640,10 +664,10 @@ impl Compose<'_> {
                         .with_padding(Edges::symmetric(Pt(spacer.height.get() / 2.0), Pt(0.0))),
                 )
             }
-            ir::Node::Box(c) => self.container(c, width, false)?,
-            ir::Node::Row(c) => self.container(c, width, true)?,
+            ir::Node::Box(c) => self.container(c, width, false),
+            ir::Node::Row(c) => self.container(c, width, true),
             ir::Node::Link(link) => Content::Link(Box::new(
-                LinkContent::url(link.href.clone(), self.inline(&link.child, width)?)
+                LinkContent::url(link.href.clone(), self.inline(&link.child, width))
                     .with_width(width),
             )),
             // Tables, lists and breaks are block-level; nesting one inside a
@@ -658,16 +682,11 @@ impl Compose<'_> {
                 );
                 Content::Empty
             }
-        })
+        }
     }
 
     /// A box or a row, as one piece of content.
-    fn container(
-        &mut self,
-        c: &ir::Container,
-        width: Pt,
-        side_by_side: bool,
-    ) -> Result<Content, BuildError> {
+    fn container(&mut self, c: &ir::Container, width: Pt, side_by_side: bool) -> Content {
         let outer = c.style.width.unwrap_or(width);
         let inner = outer - c.style.padding.horizontal();
         check_corners(&c.style, self.diagnostics);
@@ -675,9 +694,9 @@ impl Compose<'_> {
             .with_width(outer)
             .with_padding(c.style.padding);
 
-        let filled = self.fill(boxed, &c.children, inner, side_by_side)?;
+        let filled = self.fill(boxed, &c.children, inner, side_by_side);
         if c.style.space_after.get() == 0.0 {
-            return Ok(Content::Box(filled));
+            return Content::Box(filled);
         }
 
         // The space below goes *outside* the decoration, in a plain box that
@@ -686,12 +705,12 @@ impl Compose<'_> {
         // up — a background stretches over the gap: the author asks for room
         // after the box and gets a taller box. A paragraph has nothing painted
         // behind it, which is why the shortcut is safe there and not here.
-        Ok(Content::Box(
+        Content::Box(
             BoxContent::default()
                 .with_width(outer)
                 .with_padding(Edges::bottom(c.style.space_after))
                 .stack(Content::Box(filled)),
-        ))
+        )
     }
 
     /// Puts children into a container, beside one another or stacked.
@@ -708,12 +727,12 @@ impl Compose<'_> {
         children: &[ir::Node],
         inner: Pt,
         side_by_side: bool,
-    ) -> Result<BoxContent, BuildError> {
+    ) -> BoxContent {
         if !side_by_side {
             for child in children {
-                boxed = boxed.stack(self.inline(child, inner)?);
+                boxed = boxed.stack(self.inline(child, inner));
             }
-            return Ok(boxed);
+            return boxed;
         }
 
         // Declared widths are taken first; the rest share what is left, the
@@ -732,10 +751,10 @@ impl Compose<'_> {
         let mut x = Pt(0.0);
         for child in children {
             let child_width = Pt(declared_width(child).unwrap_or(share));
-            boxed = boxed.place(x, self.inline(child, child_width)?);
+            boxed = boxed.place(x, self.inline(child, child_width));
             x = x + child_width;
         }
-        Ok(boxed)
+        boxed
     }
 }
 
@@ -856,7 +875,7 @@ impl Walk<'_> {
         }
     }
 
-    pub(crate) fn node(&mut self, node: &ir::Node, width: Pt) -> Result<(), BuildError> {
+    pub(crate) fn node(&mut self, node: &ir::Node, width: Pt) {
         match node {
             ir::Node::PageBreak(brk) => {
                 self.pending_break = Some(match brk.to {
@@ -874,15 +893,14 @@ impl Walk<'_> {
             }
             ir::Node::Spacer(spacer) => self.spacer(spacer.height),
             ir::Node::Text(text) => self.text(&text.runs, text.style, width),
-            ir::Node::Box(b) => self.container(&b.style, &b.children, width, false)?,
-            ir::Node::Row(r) => self.container(&r.style, &r.children, width, true)?,
-            ir::Node::Image(image) => self.image(&image.src, image.width)?,
-            ir::Node::Link(link) => self.link(&link.href, &link.child, width)?,
+            ir::Node::Box(b) => self.container(&b.style, &b.children, width, false),
+            ir::Node::Row(r) => self.container(&r.style, &r.children, width, true),
+            ir::Node::Image(image) => self.image(&image.src, image.width),
+            ir::Node::Link(link) => self.link(&link.href, &link.child, width),
             ir::Node::Canvas(canvas) => self.canvas(canvas, width),
             ir::Node::List(list) => self.list(list, width),
             ir::Node::Table(table) => self.table(table, width),
         }
-        Ok(())
     }
 
     fn compose(&mut self) -> Compose<'_> {
@@ -897,7 +915,7 @@ impl Walk<'_> {
         self.compose().runs(runs, style)
     }
 
-    fn image_content(&mut self, src: &str, width: Pt) -> Result<ImageContent, BuildError> {
+    fn image_content(&mut self, src: &str, width: Pt) -> Option<ImageContent> {
         self.compose().image_content(src, width)
     }
 
@@ -952,7 +970,7 @@ impl Walk<'_> {
         children: &[ir::Node],
         width: Pt,
         side_by_side: bool,
-    ) -> Result<(), BuildError> {
+    ) {
         // A container is one atom: its children are painted inside it, so a
         // background cannot land on top of its own text.
         check_corners(style, self.diagnostics);
@@ -964,17 +982,16 @@ impl Walk<'_> {
 
         // The placement itself is `Compose`'s, so that a row walked at the top
         // level and a row composed inside something else cannot drift apart.
-        let boxed = self.compose().fill(boxed, children, inner, side_by_side)?;
+        let boxed = self.compose().fill(boxed, children, inner, side_by_side);
 
         let mut atom = Atom::new(boxed.height());
         atom.keep_with_next = style.keep_with_next;
         self.emit(atom, Content::Box(boxed));
         self.spacer(style.space_after);
-        Ok(())
     }
 
     /// Builds a node as a single piece of content rather than emitting it.
-    fn inline(&mut self, node: &ir::Node, width: Pt) -> Result<Content, BuildError> {
+    fn inline(&mut self, node: &ir::Node, width: Pt) -> Content {
         Compose {
             shaper: self.shaper,
             assets: self.assets,
@@ -983,19 +1000,19 @@ impl Walk<'_> {
         .inline(node, width)
     }
 
-    fn image(&mut self, src: &str, width: Pt) -> Result<(), BuildError> {
-        let content = self.image_content(src, width)?;
+    fn image(&mut self, src: &str, width: Pt) {
+        let Some(content) = self.image_content(src, width) else {
+            return;
+        };
         let atom = Atom::new(content.height);
         self.emit(atom, Content::Image(content));
-        Ok(())
     }
 
-    fn link(&mut self, href: &str, child: &ir::Node, width: Pt) -> Result<(), BuildError> {
-        let content = self.inline(child, width)?;
+    fn link(&mut self, href: &str, child: &ir::Node, width: Pt) {
+        let content = self.inline(child, width);
         let height = content.height();
         let link = LinkContent::url(href.to_string(), content).with_width(width);
         self.emit(Atom::new(height), Content::Link(Box::new(link)));
-        Ok(())
     }
 
     fn canvas(&mut self, canvas: &ir::Canvas, _width: Pt) {
@@ -1457,20 +1474,65 @@ mod tests {
     }
 
     #[test]
-    fn an_image_the_document_never_supplied_is_named_in_the_error() {
-        let err = build(
-            &document(vec![ir::Node::Image(ir::Image {
+    fn an_image_the_document_never_supplied_is_reported_and_left_out() {
+        // A picture is one thing on the page, and the page is not a reason to
+        // lose. The producer that named it hears about it as an error
+        // diagnostic, which the dev server shows and CI can refuse, and
+        // everything around it still prints.
+        let out = built(vec![
+            ir::Node::Image(ir::Image {
                 src: "sello".into(),
                 width: Pt(50.0),
-            })]),
-            &assets(),
-            Options::default(),
-        );
+            }),
+            paragraph("what came after it"),
+        ]);
 
-        match err {
-            Err(BuildError::UnknownAsset(name)) => assert_eq!(name, "sello"),
-            other => panic!("expected a named asset error, got {other:?}"),
-        }
+        assert_eq!(out.pages, 1);
+        assert!(
+            out.diagnostics
+                .iter()
+                .any(|d| d.contains("unknown-image") && d.contains("sello")),
+            "{:?}",
+            out.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_band_keeps_the_rest_when_an_image_it_names_was_not_handed_over() {
+        // A band is composed as one piece, so an image it could not build took
+        // the whole band down with it, in silence, and with it everything a
+        // running header carries: the title, the page number, who the document
+        // belongs to. One picture short, and twenty pages arrive headless.
+        let document = ir::Document {
+            page: ir::PageSetup::default(),
+            header: Some(ir::Band {
+                height: Pt(60.0),
+                children: vec![ir::Node::Row(ir::Container {
+                    style: ir::BoxStyle::default(),
+                    children: vec![
+                        ir::Node::Image(ir::Image {
+                            src: "sello".into(),
+                            width: Pt(50.0),
+                        }),
+                        paragraph("in the band"),
+                    ],
+                })],
+            }),
+            footer: None,
+            accumulators: Vec::new(),
+            children: vec![paragraph("in the flow")],
+        };
+
+        let out = build(&document, &assets(), Options { compress: false }).expect("build");
+
+        // One placing for the band and one for the flow: either alone would
+        // pass while the other was dropped.
+        assert_eq!(count(&out.pdf, b" Tm"), 2, "the band lost its text");
+        assert!(
+            out.diagnostics.iter().any(|d| d.contains("sello")),
+            "{:?}",
+            out.diagnostics
+        );
     }
 
     #[test]
@@ -2146,7 +2208,7 @@ mod tests {
             band: BandSpec::none(Pt(515.0)),
         };
         for node in &long.children {
-            walk.node(node, Pt(515.0)).unwrap();
+            walk.node(node, Pt(515.0));
         }
 
         // Four thousand rows is around sixty pages. Holding fewer than two
@@ -2209,7 +2271,7 @@ mod tests {
                     ..Default::default()
                 },
             });
-            walk.inline(&node, Pt(300.0)).unwrap().height().get()
+            walk.inline(&node, Pt(300.0)).height().get()
         };
 
         let tight = height(&mut walk, 0.0);
@@ -2264,8 +2326,8 @@ mod tests {
             })
         };
 
-        let tight = walk.inline(&panel(0.0), Pt(300.0)).unwrap().height().get();
-        let spaced = walk.inline(&panel(14.0), Pt(300.0)).unwrap().height().get();
+        let tight = walk.inline(&panel(0.0), Pt(300.0)).height().get();
+        let spaced = walk.inline(&panel(14.0), Pt(300.0)).height().get();
 
         assert!(
             (spaced - tight - 14.0).abs() < 0.01,
@@ -2949,6 +3011,61 @@ mod page_bands {
         );
     }
 
+    /// A letterhead laid out the way a real one is — a logo beside the title
+    /// — naming a picture nobody handed over.
+    fn letterhead(text: &str) -> ir::Band {
+        ir::Band {
+            height: Pt(20.0),
+            children: vec![ir::Node::Row(ir::Container {
+                style: ir::BoxStyle::default(),
+                children: vec![
+                    ir::Node::Image(ir::Image {
+                        src: "logotipo".into(),
+                        width: Pt(40.0),
+                    }),
+                    ir::Node::Text(ir::Text {
+                        runs: vec![ir::Run::new(text)],
+                        style: ir::TextStyle::default(),
+                    }),
+                ],
+            })],
+        }
+    }
+    #[test]
+    fn a_header_naming_an_image_nobody_supplied_still_reaches_every_page() {
+        // The failure this is really about, at the length it really happens
+        // at. A band is composed as one piece, so one picture it could not
+        // build made the whole band `None`, and a `None` band is not painted:
+        // a ledger came out with no title and no page number on any page, and
+        // nothing said so. Counted over a document long enough to flush,
+        // because a header that survives one short page proves nothing about
+        // the pages released on the way.
+        let bare = build(&ledger(1_200, None, None), &assets(), READABLE).unwrap();
+        let headed = build(
+            &ledger(1_200, Some(letterhead("Libro mayor")), None),
+            &assets(),
+            READABLE,
+        )
+        .unwrap();
+
+        assert!(bare.pages > 10, "the sample must flush several times over");
+        assert_eq!(
+            runs(&headed.pdf) - runs(&bare.pdf),
+            headed.pages,
+            "the header was drawn on {} pages of {}",
+            runs(&headed.pdf) - runs(&bare.pdf),
+            headed.pages
+        );
+        // One diagnostic for the document, not one for each of the pages the
+        // band was composed onto.
+        assert_eq!(headed.diagnostics.len(), 1, "{:?}", headed.diagnostics);
+        assert!(
+            headed.diagnostics[0].contains("logotipo"),
+            "{:?}",
+            headed.diagnostics
+        );
+    }
+
     #[test]
     fn a_header_band_survives_it_too() {
         let bare = build(&ledger(1_200, None, None), &assets(), READABLE).unwrap();
@@ -3019,7 +3136,7 @@ mod page_bands {
                 },
             };
             for node in &document.children {
-                ctx.node(node, width).unwrap();
+                ctx.node(node, width);
             }
         }
         finish_with_bands(

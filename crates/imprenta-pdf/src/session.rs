@@ -262,7 +262,7 @@ impl Session {
             Chunk::Nodes(nodes) => {
                 let mut walk = self.walk();
                 for node in nodes {
-                    walk.node(node, width)?;
+                    walk.node(node, width);
                 }
             }
             Chunk::OpenTable(head) => {
