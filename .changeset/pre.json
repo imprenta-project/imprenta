@@ -9,6 +9,7 @@
     "@imprentajs/xlsx": "0.0.0"
   },
   "changesets": [
+    "a-band-measures-itself",
     "a-border-colour-written-out",
     "a-cell-over-two-columns",
     "a-header-that-filters",
