@@ -20,12 +20,18 @@ interface Styled {
 
 export interface BandProps {
   /**
-   * Room taken out of every page for this band.
+   * The least room taken out of every page for this band, in points.
    *
-   * Out of the content box rather than the margin, so a band can never
-   * overlap the last line.
+   * Left off, the engine lays the band out once and reserves what it
+   * measures, which is the right answer when the content comes from data: a
+   * logo whose aspect nobody knows in advance, a company name that wraps.
+   * Given, it is a floor and not a cap — the band still grows when its
+   * content is taller — so it is for leaving a band air, not for guessing.
+   *
+   * Out of the content box rather than the margin either way, so a band can
+   * never overlap the last line.
    */
-  height: number;
+  height?: number;
   children?: ReactNode;
 }
 

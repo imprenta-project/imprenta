@@ -45,8 +45,12 @@ function lift(
     if (found[which]) {
       throw new Error(`a document has one ${which}, and this one declares two`);
     }
+    // The key is left out rather than set to `undefined`: JSON would drop it
+    // either way, but a test comparing the IR object would not, and the two
+    // must not disagree about what was declared.
+    const height = child.props.height as number | undefined;
     found[which] = {
-      height: child.props.height as number,
+      ...(height === undefined ? {} : { height }),
       children: blocks(child.children, theme),
     };
   }

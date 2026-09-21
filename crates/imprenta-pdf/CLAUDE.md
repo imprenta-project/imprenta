@@ -101,9 +101,15 @@ page ledger**.
   `Flow::resuming` exist because a repeated table header broke when the flush
   interval landed mid-group. When changing `FLUSH_EVERY` or the group logic,
   test across a flush boundary specifically.
-- **Bands are rebuilt per page.** A page number and a carried-forward total are
-  different words on every sheet, and glyphs cannot be substituted after
-  shaping. Band height comes out of the content box, never the margin.
+- **Bands are rebuilt per page, but measured once.** A page number and a
+  carried-forward total are different words on every sheet, and glyphs cannot
+  be substituted after shaping. The room a band takes is measured before the
+  first page is packed — `build::reserve`, with the widest words a token is
+  likely to take — because the packer needs a fixed budget to stream, and it
+  is measured in all three entry points (`build`, `Session::open_with`,
+  `plan`) so a fragment cannot disagree with the plan that placed it. A
+  declared `height` is a floor. Band height comes out of the content box,
+  never the margin.
 - **A page is written the moment it is finished.** `imprenta-pdf-write` puts
   the bytes in the output and keeps one offset; nothing comes back to a page
   later. So a band, a link or a repeated header that was not painted when the

@@ -298,6 +298,11 @@ impl Composer {
         &self.totals
     }
 
+    /// The page this composer lays out on, bands and all.
+    pub fn geometry(&self) -> &Geometry {
+        &self.geometry
+    }
+
     /// How many atoms are still held.
     pub fn pending(&self) -> usize {
         self.atoms.len()

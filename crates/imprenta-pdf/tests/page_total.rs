@@ -64,7 +64,7 @@ fn ledger(total: bool) -> ir::Document {
         accumulators: Vec::new(),
         header: None,
         footer: Some(ir::Band {
-            height: Pt(20.0),
+            height: Some(Pt(20.0)),
             children: vec![ir::Node::Text(ir::Text {
                 runs: vec![ir::Run::new(if total {
                     "Pagina {{page}} de {{pages}}"

@@ -45,6 +45,25 @@ describe('bands', () => {
     expect(document.footer?.height).toBe(24);
   });
 
+  it('lets a band leave its height to the engine', async () => {
+    // The number was a guess at how tall the content would come out, and a
+    // logo or a company name that wraps made the guess wrong with nothing to
+    // say so. Left off, the engine measures the band; the IR must not carry a
+    // `height` key for the engine to read as a declared nothing.
+    const document = await toDocument(
+      <Document>
+        <Header>
+          <Text>Libro mayor</Text>
+        </Header>
+        <Text>Contenido</Text>
+      </Document>,
+    );
+
+    expect(document.header).toStrictEqual({
+      children: [{ t: 'text', runs: [{ text: 'Libro mayor' }] }],
+    });
+  });
+
   it('leaves a document with no bands alone', async () => {
     const document = await toDocument(
       <Document>

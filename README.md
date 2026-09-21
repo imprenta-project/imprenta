@@ -196,7 +196,7 @@ engine says which box it happened to.
 
 ```tsx
 <Document accumulators={['saldo']}>
-  <Header height={38}>
+  <Header>
     <Text>Libro mayor — ejercicio 2026</Text>
   </Header>
   <Footer height={30}>
@@ -213,6 +213,13 @@ A band is declared once and built again for every page, because a page number
 and a carried-forward total are different words on every sheet and glyphs
 cannot be substituted after they are shaped. Its height comes out of the
 content box rather than the margin, so it can never overlap the last line.
+
+The engine measures that height: the band is laid out once, with the widest
+words its tokens are likely to take, and every page gives up what it came to.
+`height` is optional and, when given, a floor rather than a cap — the band
+still grows when a logo or a wrapped company name needs more, and a page whose
+running total comes out wider than the band was measured with is reported as
+`band-overflow`, naming the page and the overrun in points.
 
 `<PageCount />` is the one thing that costs something: nothing can know the
 total until the last page is packed, so a document that prints one is held

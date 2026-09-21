@@ -29,19 +29,31 @@ fn main() {
             margin: Edges::all(Pt(40.0)),
             ..Default::default()
         },
+        // No height: the engine measures the two lines and the padding under
+        // them, and that is what every page gives up. The air between the
+        // band and the first row is the band's own, not a number to guess.
         header: Some(ir::Band {
-            height: Pt(38.0),
-            children: vec![
-                text(
-                    vec![ir::Run::new("Libro mayor — ejercicio 2026")],
-                    12.0,
-                    "#1b3a5c",
-                ),
-                text(vec![ir::Run::new("Cuenta 430 · Clientes")], 8.0, "#64748b"),
-            ],
+            height: None,
+            children: vec![ir::Node::Box(ir::Container {
+                style: ir::BoxStyle {
+                    padding: Edges {
+                        bottom: Pt(10.0),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                children: vec![
+                    text(
+                        vec![ir::Run::new("Libro mayor — ejercicio 2026")],
+                        12.0,
+                        "#1b3a5c",
+                    ),
+                    text(vec![ir::Run::new("Cuenta 430 · Clientes")], 8.0, "#64748b"),
+                ],
+            })],
         }),
         footer: Some(ir::Band {
-            height: Pt(30.0),
+            height: Some(Pt(30.0)),
             children: vec![ir::Node::Box(ir::Container {
                 style: ir::BoxStyle {
                     border: Edges {

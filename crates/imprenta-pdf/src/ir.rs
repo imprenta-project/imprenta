@@ -67,12 +67,23 @@ impl Default for PageSetup {
 /// token — `{{page}}`, `{{pages}}`, `{{opening:total}}`, `{{closing:total}}`
 /// — and filled in as the page is painted.
 ///
-/// The height is reserved out of the content box rather than out of the
-/// margin, so a band can never overlap the last line.
+/// The room it takes is reserved out of the content box rather than out of
+/// the margin, so a band can never overlap the last line.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Band {
-    pub height: Pt,
+    /// The least room to reserve on every page, or nothing to have it
+    /// measured.
+    ///
+    /// The engine lays the band out once, with the widest words a page could
+    /// put into its tokens, and reserves that — or this, whichever is taller.
+    /// It used to be the author's number alone, which was a guess at what the
+    /// content would measure, and the guess went wrong the moment the content
+    /// came from data: a square logo set to 113 pt wide ran 51 pt past a band
+    /// sized for a 62 pt letterhead and was painted over the first lines of
+    /// the page. Nothing said so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<Pt>,
     #[serde(default)]
     pub children: Vec<Node>,
 }
@@ -863,6 +874,19 @@ mod tests {
         let table: Table = serde_json::from_str(r#"{"columns":[],"rows":[]}"#).expect("parse");
 
         assert!(table.repeat_header, "the default must be to repeat");
+    }
+
+    #[test]
+    fn a_band_need_not_say_how_tall_it_is() {
+        // The number was the author's guess at how tall the content would
+        // come out, and a logo or a wrapped company name made the guess wrong
+        // with no warning. Left out, the engine measures; given, it is the
+        // least the band takes.
+        let measured: Band = serde_json::from_str(r#"{"children":[]}"#).expect("parse");
+        let sized: Band = serde_json::from_str(r#"{"height":128,"children":[]}"#).expect("parse");
+
+        assert_eq!(measured.height, None);
+        assert_eq!(sized.height, Some(Pt(128.0)));
     }
 
     #[test]

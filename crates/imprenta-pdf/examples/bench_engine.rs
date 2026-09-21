@@ -83,7 +83,7 @@ fn ledger(rows: usize, total: bool) -> ir::Document {
         page: ir::PageSetup::default(),
         accumulators: vec!["debe".into()],
         header: Some(ir::Band {
-            height: Pt(28.0),
+            height: Some(Pt(28.0)),
             children: vec![ir::Node::Text(ir::Text {
                 runs: vec![ir::Run::new("Libro mayor · ejercicio 2024").bold()],
                 style: ir::TextStyle {
@@ -93,7 +93,7 @@ fn ledger(rows: usize, total: bool) -> ir::Document {
             })],
         }),
         footer: Some(ir::Band {
-            height: Pt(20.0),
+            height: Some(Pt(20.0)),
             children: vec![ir::Node::Text(ir::Text {
                 runs: vec![ir::Run::new(if total {
                     "Pagina {{page}} de {{pages}} · suma y sigue {{debe}}"

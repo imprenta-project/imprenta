@@ -134,22 +134,19 @@ pub fn build(
 
     let mut shaper = Shaper::with_faces(assets.fonts.iter().cloned());
     let fonts = Fonts::from_shaper(&shaper)?;
-    let geometry = Geometry {
-        width: document.page.width,
-        height: document.page.height,
-        margin: document.page.margin,
-        bands: Bands {
-            header: document.header.as_ref().map_or(Pt(0.0), |b| b.height),
-            footer: document.footer.as_ref().map_or(Pt(0.0), |b| b.height),
-        },
-    };
-    let width = geometry.width - geometry.margin.horizontal();
+    let width = document.page.width - document.page.margin.horizontal();
     // Built before the walk rather than at the end, because a page released
     // part-way through the walk needs its header and footer just as much as
     // the last one does.
     let declared = crate::session::Bands {
         header: document.header.clone(),
         footer: document.footer.clone(),
+    };
+    let geometry = Geometry {
+        width: document.page.width,
+        height: document.page.height,
+        margin: document.page.margin,
+        bands: reserve(&declared, &mut shaper, assets, width),
     };
     let band = BandSpec {
         bands: &declared,
@@ -344,15 +341,20 @@ pub fn plan(
     if assets.fonts.is_empty() {
         return Err(BuildError::NoFonts);
     }
-    let shaper = Shaper::with_faces(assets.fonts.iter().cloned());
+    let mut shaper = Shaper::with_faces(assets.fonts.iter().cloned());
+    // Measured here exactly as the fragments will measure it: a plan that
+    // gave the bands a different room from the render would put every page
+    // boundary out, and the only sign would be the page numbers.
     let geometry = Geometry {
         width: page.width,
         height: page.height,
         margin: page.margin,
-        bands: Bands {
-            header: bands.header.as_ref().map_or(Pt(0.0), |b| b.height),
-            footer: bands.footer.as_ref().map_or(Pt(0.0), |b| b.height),
-        },
+        bands: reserve(
+            bands,
+            &mut shaper,
+            assets,
+            page.width - page.margin.horizontal(),
+        ),
     };
     let mut composer =
         Composer::new(geometry, Fonts::from_shaper(&shaper)?)?.with_accumulators(accumulators);
@@ -386,6 +388,7 @@ pub fn finish_with_bands(
         bands,
         names,
         width,
+        reserved: composer.geometry().bands,
     };
     composer.finish_with(&mut |page| band_assets.paint(page))
 }
@@ -398,58 +401,95 @@ struct BandAssets<'a> {
     bands: &'a crate::session::Bands,
     names: &'a [String],
     width: Pt,
+    /// The room the geometry set aside for each band, so a page whose band
+    /// comes out taller can say so.
+    reserved: Bands,
 }
 
 impl BandAssets<'_> {
     fn paint(&mut self, page: &PageContext) -> Painted {
         Painted {
-            header: self.band(self.bands.header.clone().as_ref(), page),
-            footer: self.band(self.bands.footer.clone().as_ref(), page),
+            header: self.band(
+                "header",
+                self.bands.header.as_ref(),
+                self.reserved.header,
+                page,
+            ),
+            footer: self.band(
+                "footer",
+                self.bands.footer.as_ref(),
+                self.reserved.footer,
+                page,
+            ),
         }
     }
 
-    fn band(&mut self, band: Option<&ir::Band>, page: &PageContext) -> Option<Content> {
+    fn band(
+        &mut self,
+        role: &str,
+        band: Option<&ir::Band>,
+        reserved: Pt,
+        page: &PageContext,
+    ) -> Option<Content> {
         let band = band?;
-        let filled: Vec<ir::Node> = band
-            .children
-            .iter()
-            .map(|node| fill(node, page, self.names, self.diagnostics))
-            .collect();
-
-        // Composed as one piece rather than emitted: a band is not part of
-        // the flow and must never be paginated.
-        let mut compose = Compose {
+        let filled = fill(band, &mut |token| {
+            resolve(token, page, self.names, self.diagnostics)
+        });
+        let boxed = Compose {
             shaper: self.shaper,
             assets: self.assets,
             diagnostics: self.diagnostics,
-        };
-        let mut boxed = BoxContent::default().with_width(self.width);
-        // Nothing here can refuse the band. Composing reports what it could
-        // not build and leaves that piece out, which is the only shape that
-        // works for a band: one composed as a whole used to be dropped whole,
-        // so a logo nobody handed over cost every page its title, its number
-        // and its customer, silently. One picture short is one picture short.
-        for node in &filled {
-            boxed = boxed.stack(compose.inline(node, self.width));
+        }
+        .band(&filled, self.width);
+
+        // The room was measured with the widest words a page usually brings,
+        // and this page brought wider ones: a total that ran to another
+        // group of digits and wrapped. The page is painted regardless — a
+        // footer over the margin is a fault, a page missing is a loss — and
+        // the author is told which page and by how much, which used to be
+        // found by whoever printed it. The threshold is float noise, not
+        // tolerance: a band a hundredth of a point over is the band that was
+        // measured.
+        let overflow = boxed.height() - reserved;
+        if overflow.get() > 0.01 {
+            self.diagnostics.report(
+                imprenta_core::diagnostic::Diagnostic::warning(
+                    "band-overflow",
+                    format!(
+                        "the {role} runs {:.1} pt past the {:.1} pt reserved for it",
+                        overflow.get(),
+                        reserved.get()
+                    ),
+                )
+                .on_page(page.number as u32)
+                .with_hint("give the band a `height` with room for its widest page"),
+            );
         }
         Some(Content::Box(boxed))
     }
 }
 
-/// Replaces the tokens a page can answer.
-fn fill(
-    node: &ir::Node,
-    page: &PageContext,
-    names: &[String],
-    diagnostics: &mut Diagnostics,
-) -> ir::Node {
+/// A band's children with their tokens replaced by the words `word` gives.
+///
+/// Which words depends on who is asking: a page being painted wants its own
+/// number and its own totals, and a band being measured wants the widest
+/// words any page could bring. The walk over the tree is the same either
+/// way, so it takes the answer as a function rather than knowing both.
+fn fill(band: &ir::Band, word: &mut dyn FnMut(&str) -> String) -> Vec<ir::Node> {
+    band.children
+        .iter()
+        .map(|node| fill_node(node, word))
+        .collect()
+}
+
+fn fill_node(node: &ir::Node, word: &mut dyn FnMut(&str) -> String) -> ir::Node {
     match node {
         ir::Node::Text(text) => ir::Node::Text(ir::Text {
             runs: text
                 .runs
                 .iter()
                 .map(|run| ir::Run {
-                    text: substitute(&run.text, page, names, diagnostics),
+                    text: substitute(&run.text, word),
                     ..run.clone()
                 })
                 .collect(),
@@ -460,7 +500,7 @@ fn fill(
             children: c
                 .children
                 .iter()
-                .map(|child| fill(child, page, names, diagnostics))
+                .map(|child| fill_node(child, word))
                 .collect(),
         }),
         ir::Node::Row(c) => ir::Node::Row(ir::Container {
@@ -468,20 +508,15 @@ fn fill(
             children: c
                 .children
                 .iter()
-                .map(|child| fill(child, page, names, diagnostics))
+                .map(|child| fill_node(child, word))
                 .collect(),
         }),
         other => other.clone(),
     }
 }
 
-/// One string, with what the page knows put into it.
-fn substitute(
-    text: &str,
-    page: &PageContext,
-    names: &[String],
-    diagnostics: &mut Diagnostics,
-) -> String {
+/// One string, with every `{{token}}` replaced by the word given for it.
+fn substitute(text: &str, word: &mut dyn FnMut(&str) -> String) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("{{") {
@@ -490,11 +525,74 @@ fn substitute(
             break;
         };
         let token = &rest[start + 2..start + end];
-        out.push_str(&resolve(token.trim(), page, names, diagnostics));
+        out.push_str(&word(token.trim()));
         rest = &rest[start + end + 2..];
     }
     out.push_str(rest);
     out
+}
+
+/// The widest word a token is likely to take, for measuring a band with.
+///
+/// A band is laid out once and the room it measures is reserved on every
+/// page, so it has to be measured with the page that needs the most. That
+/// page cannot be found without packing the document — which is what the
+/// reservation is needed for — so this stands in for it: a page count that
+/// runs to five digits, and a total in the hundreds of millions, signed.
+/// Digits are the same width in every face made for setting numbers, so which
+/// digits does not matter; how many does. A page that brings a wider word than
+/// this is reported as it is painted, which is the only place it can be seen.
+fn widest(token: &str) -> String {
+    match token.split_once(':') {
+        Some(("opening" | "closing", _)) => format(-999_999_999.99),
+        _ => match token {
+            "page" | "pages" => "99999".into(),
+            _ => String::new(),
+        },
+    }
+}
+
+/// How much of every page a document's bands take.
+///
+/// Measured rather than declared, because the declared number was a guess at
+/// what the content would come to, and the guess had no way of being right
+/// when the content came from data. Each band is laid out once, with the
+/// widest words its tokens are likely to take, and the taller of that and the
+/// declared height is what the page gives up. Declared alone it is a floor,
+/// which lets an author leave a band more room than its content needs.
+///
+/// What measuring cannot build is not reported here: the same nodes are
+/// composed again for every page painted, and each of those reports it.
+pub(crate) fn reserve(
+    bands: &crate::session::Bands,
+    shaper: &mut Shaper,
+    assets: &Assets,
+    width: Pt,
+) -> Bands {
+    let mut discarded = Diagnostics::default();
+    let mut room = |band: Option<&ir::Band>| {
+        let Some(band) = band else {
+            return Pt(0.0);
+        };
+        let filled = fill(band, &mut widest);
+        let measured = Compose {
+            shaper,
+            assets,
+            diagnostics: &mut discarded,
+        }
+        .band(&filled, width)
+        .height();
+        let declared = band.height.unwrap_or(Pt(0.0));
+        if declared > measured {
+            declared
+        } else {
+            measured
+        }
+    };
+    Bands {
+        header: room(bands.header.as_ref()),
+        footer: room(bands.footer.as_ref()),
+    }
 }
 
 fn resolve(
@@ -611,6 +709,28 @@ impl Compose<'_> {
             width,
         ))
     }
+    /// A band as the one piece of content it is painted as.
+    ///
+    /// Composed rather than emitted: a band is not part of the flow and must
+    /// never be paginated. Nothing here can refuse it. Composing reports what
+    /// it could not build and leaves that piece out, which is the only shape
+    /// that works for a band: one composed as a whole used to be dropped
+    /// whole, so a logo nobody handed over cost every page its title, its
+    /// number and its customer, silently. One picture short is one picture
+    /// short.
+    ///
+    /// Shared by measuring and painting so the two cannot disagree: the box
+    /// the page gives up its room to is the box that is drawn into it. The
+    /// children arrive with their tokens already [`fill`]ed, because the words
+    /// are the one thing the two callers do differently.
+    fn band(&mut self, children: &[ir::Node], width: Pt) -> BoxContent {
+        let mut boxed = BoxContent::default().with_width(width);
+        for node in children {
+            boxed = boxed.stack(self.inline(node, width));
+        }
+        boxed
+    }
+
     /// A node as one piece of content, always.
     ///
     /// Infallible on purpose, and it is the bands that make it so: a band is
@@ -865,6 +985,7 @@ impl Walk<'_> {
             bands: band.bands,
             names: band.names,
             width: band.width,
+            reserved: composer.geometry().bands,
         };
         composer.flush_with(&mut |page| bands.paint(page));
     }
@@ -1506,7 +1627,7 @@ mod tests {
         let document = ir::Document {
             page: ir::PageSetup::default(),
             header: Some(ir::Band {
-                height: Pt(60.0),
+                height: Some(Pt(60.0)),
                 children: vec![ir::Node::Row(ir::Container {
                     style: ir::BoxStyle::default(),
                     children: vec![
@@ -2076,6 +2197,44 @@ mod tests {
     }
 
     #[test]
+    fn planning_gives_an_unsized_band_the_room_the_render_does() {
+        // The plan and the fragments each measure the band for themselves, on
+        // their own shaper, and have to arrive at the same number: a header
+        // one line taller in the plan than in the render would move every
+        // page boundary after the first.
+        let assets = assets();
+        let bands = crate::session::Bands {
+            header: Some(ir::Band {
+                height: None,
+                children: vec![
+                    ir::Node::Image(ir::Image {
+                        src: "logo".into(),
+                        width: Pt(240.0),
+                    }),
+                    paragraph("Libro mayor {{page}}"),
+                ],
+            }),
+            footer: None,
+        };
+        let mut document = ledger(2_000);
+        document.header = bands.header.clone();
+        let real = build(&document, &assets, Options::default()).unwrap();
+
+        let measured = measure_rows(
+            &assets,
+            &ir::PageSetup::default(),
+            &ledger_head(),
+            &ledger_rows(2_000),
+        )
+        .unwrap();
+        let atoms: Vec<Atom> = measured.iter().map(MeasuredRow::atom).collect();
+        let plan = plan(&ir::PageSetup::default(), &assets, &bands, 0, &atoms).unwrap();
+
+        assert!(real.pages > 20, "the fixture must paginate properly");
+        assert_eq!(plan.len(), real.pages);
+    }
+
+    #[test]
     fn planning_costs_atoms_and_not_content() {
         // Planning holds the whole document where rendering deliberately does
         // not, so what it holds has to be the cheap half. An atom is a height
@@ -2540,7 +2699,7 @@ mod tests {
         let nested = |align| ir::Document {
             page: ir::PageSetup::default(),
             header: Some(ir::Band {
-                height: Pt(60.0),
+                height: Some(Pt(60.0)),
                 children: vec![aligned(align)],
             }),
             footer: None,
@@ -2605,7 +2764,7 @@ mod tests {
         let document = ir::Document {
             page: ir::PageSetup::default(),
             header: Some(ir::Band {
-                height: Pt(90.0),
+                height: Some(Pt(90.0)),
                 children: vec![grey, paragraph("y")],
             }),
             footer: None,
@@ -2707,7 +2866,7 @@ mod tests {
         let banded = |align| ir::Document {
             page: ir::PageSetup::default(),
             header: Some(ir::Band {
-                height: Pt(120.0),
+                height: Some(Pt(120.0)),
                 children: vec![paragraph(align)],
             }),
             footer: None,
@@ -2873,9 +3032,15 @@ mod page_bands {
     use imprenta_core::color::Color;
 
     const REGULAR: &[u8] = include_bytes!("../tests/fonts/Roboto-Regular.ttf");
+    /// 240 by 80 pixels, so a width says what height to expect.
+    const LOGO: &[u8] = include_bytes!("../tests/images/logo.png");
 
     fn assets() -> Assets {
         Assets::new().with_font(Face::REGULAR, REGULAR.to_vec())
+    }
+
+    fn branded() -> Assets {
+        assets().with_image("logo", LOGO.to_vec()).unwrap()
     }
 
     /// A ledger long enough to run over several pages.
@@ -2907,7 +3072,7 @@ mod page_bands {
 
     fn band(height: f32, text: &str) -> ir::Band {
         ir::Band {
-            height: Pt(height),
+            height: Some(Pt(height)),
             children: vec![ir::Node::Text(ir::Text {
                 runs: vec![ir::Run::new(text)],
                 style: ir::TextStyle::default(),
@@ -3015,7 +3180,7 @@ mod page_bands {
     /// — naming a picture nobody handed over.
     fn letterhead(text: &str) -> ir::Band {
         ir::Band {
-            height: Pt(20.0),
+            height: Some(Pt(20.0)),
             children: vec![ir::Node::Row(ir::Container {
                 style: ir::BoxStyle::default(),
                 children: vec![
@@ -3108,8 +3273,14 @@ mod page_bands {
             height: document.page.height,
             margin: document.page.margin,
             bands: Bands {
-                header: document.header.as_ref().map_or(Pt(0.0), |b| b.height),
-                footer: document.footer.as_ref().map_or(Pt(0.0), |b| b.height),
+                header: document
+                    .header
+                    .as_ref()
+                    .map_or(Pt(0.0), |b| b.height.unwrap_or(Pt(0.0))),
+                footer: document
+                    .footer
+                    .as_ref()
+                    .map_or(Pt(0.0), |b| b.height.unwrap_or(Pt(0.0))),
             },
         };
         let width = geometry.width - geometry.margin.horizontal();
@@ -3262,7 +3433,7 @@ mod page_bands {
             &ledger(
                 20,
                 Some(ir::Band {
-                    height: Pt(30.0),
+                    height: Some(Pt(30.0)),
                     children: vec![ir::Node::Box(ir::Container {
                         style: ir::BoxStyle {
                             background: Some(Color::parse_hex("#f1f5f9").unwrap()),
@@ -3283,5 +3454,211 @@ mod page_bands {
 
         assert_eq!(built.pages, 1);
         assert!(built.diagnostics.is_empty(), "{:?}", built.diagnostics);
+    }
+    // ── a band measures itself ──────────────────────────────────────────
+
+    /// A band holding one picture, set `width` wide, `height` as given.
+    fn logo(width: f32, height: Option<Pt>) -> ir::Band {
+        ir::Band {
+            height,
+            children: vec![ir::Node::Image(ir::Image {
+                src: "logo".into(),
+                width: Pt(width),
+            })],
+        }
+    }
+
+    fn footer_saying(text: &str) -> crate::session::Bands {
+        crate::session::Bands {
+            header: None,
+            footer: Some(ir::Band {
+                height: None,
+                children: vec![ir::Node::Text(ir::Text {
+                    runs: vec![ir::Run::new(text)],
+                    style: ir::TextStyle::default(),
+                })],
+            }),
+        }
+    }
+
+    /// The room the bands take, measured with the fonts and images given.
+    fn reserved(bands: &crate::session::Bands, assets: &Assets, width: Pt) -> Bands {
+        let mut shaper = Shaper::with_faces(assets.fonts.iter().cloned());
+        reserve(bands, &mut shaper, assets, width)
+    }
+
+    #[test]
+    fn a_band_left_unsized_reserves_what_its_content_measures() {
+        // The number used to be the author's, and the author cannot know it
+        // when the content comes from data: a company sets its logo to 113 pt
+        // wide, the logo is square, and a header sized for a 62 pt letterhead
+        // painted it over the first lines of every page. Here the picture is
+        // three to one, so 120 pt wide is 40 pt tall.
+        let bands = crate::session::Bands {
+            header: Some(logo(120.0, None)),
+            footer: None,
+        };
+
+        let room = reserved(&bands, &branded(), Pt(500.0));
+
+        assert!((room.header.get() - 40.0).abs() < 0.01, "{:?}", room);
+        assert_eq!(room.footer, Pt(0.0));
+    }
+
+    #[test]
+    fn a_declared_height_is_the_least_a_band_takes_and_not_the_most() {
+        // Declared and roomy, the number stands: an author may want a band
+        // taller than its content, for air. Declared and short, the content
+        // wins, because the alternative is the overlap this exists to stop.
+        let room_for = |height: f32| {
+            reserved(
+                &crate::session::Bands {
+                    header: Some(logo(120.0, Some(Pt(height)))),
+                    footer: None,
+                },
+                &branded(),
+                Pt(500.0),
+            )
+            .header
+        };
+
+        assert_eq!(room_for(128.0), Pt(128.0));
+        assert!((room_for(20.0).get() - 40.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn an_unsized_band_paginates_as_if_the_measured_height_had_been_declared() {
+        // The measured number has to reach the packer through the same
+        // geometry a declared one does, or the two paths would drift apart.
+        // A picture wide enough that its height moves a page boundary: a
+        // forty point header on an A4 page changes the count only sometimes.
+        let measured = reserved(
+            &crate::session::Bands {
+                header: Some(logo(480.0, None)),
+                footer: None,
+            },
+            &branded(),
+            ir::PageSetup::default().width - ir::PageSetup::default().margin.horizontal(),
+        )
+        .header;
+        let measured_only = build(
+            &ledger(200, Some(logo(480.0, None)), None),
+            &branded(),
+            READABLE,
+        )
+        .unwrap();
+        let declared = build(
+            &ledger(200, Some(logo(480.0, Some(measured))), None),
+            &branded(),
+            READABLE,
+        )
+        .unwrap();
+        let bare = build(&ledger(200, None, None), &branded(), READABLE).unwrap();
+
+        assert!(measured_only.pages > 2, "the sample must paginate");
+        assert!(
+            measured_only.pages > bare.pages,
+            "the header must take room"
+        );
+        assert_eq!(measured_only.pdf, declared.pdf);
+    }
+
+    #[test]
+    fn a_band_is_measured_with_the_widest_words_a_page_can_put_in_it() {
+        // Page one is the wrong page to measure with: it says "1", the total
+        // stands at nothing, and the band comes out a line shorter than the
+        // page that prints "1.234.567,89". So the tokens are filled with the
+        // widest words they are likely to take, on a width narrow enough here
+        // that the difference is a whole line.
+        let assets = assets();
+        let lines_of = |text: &str| reserved(&footer_saying(text), &assets, Pt(90.0)).footer;
+
+        assert_eq!(
+            lines_of("Total {{closing:total}}"),
+            lines_of("Total -999.999.999,99"),
+            "a total is measured at its widest"
+        );
+        assert!(
+            lines_of("Total {{closing:total}}") > lines_of("Total 0,00"),
+            "the sample must be narrow enough for the widest total to wrap"
+        );
+        assert_eq!(
+            lines_of("Pagina {{page}} de {{pages}}"),
+            lines_of("Pagina 99999 de 99999"),
+            "a page number is measured at its widest"
+        );
+    }
+
+    #[test]
+    fn a_band_that_outgrows_its_room_on_a_later_page_is_reported() {
+        // The one case measuring once cannot cover: a running total wider
+        // than the widest word it was measured with, on a page nobody looks
+        // at. Silence was the behaviour and the worst option; the page is
+        // still emitted, and one diagnostic says which page and by how much.
+        //
+        // A page just wide enough for the widest word measured, so that a
+        // total one group wider is what wraps the footer onto a second line.
+        let assets = assets();
+        let saying = "Suma y sigue";
+        let widest = {
+            let mut shaper = Shaper::with_faces(assets.fonts.iter().cloned());
+            crate::measure::measure_text(
+                &mut shaper,
+                &format!("{saying} -999.999.999,99"),
+                crate::measure::TextStyle::new(ir::TextStyle::default().size),
+                Pt(1_000.0),
+            )
+            .lines[0]
+                .width
+        };
+        let margin = Pt(20.0);
+        let page = ir::PageSetup {
+            width: widest + margin + margin + Pt(2.0),
+            height: Pt(300.0),
+            margin: Edges::all(margin),
+        };
+        // Only the last row counts, so only the last page's total is wide.
+        let report = |last: f64| {
+            let rows = 60;
+            let document = ir::Document {
+                page,
+                header: None,
+                footer: footer_saying(&format!("{saying} {{{{closing:total}}}}")).footer,
+                accumulators: vec!["total".into()],
+                children: vec![ir::Node::Table(ir::Table {
+                    columns: vec![ir::ColumnSpec::default()],
+                    rows: (0..rows)
+                        .map(|i| ir::Row {
+                            cells: vec![ir::Cell::new(format!("{i:04}"))],
+                            totals: vec![ir::TotalContribution {
+                                accumulator: 0,
+                                value: if i + 1 == rows { last } else { 0.0 },
+                            }],
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..ir::Table::empty()
+                })],
+            };
+            build(&document, &assets, Options::default()).unwrap()
+        };
+
+        let fits = report(100.0);
+        let wraps = report(1_000_000_000_000.0);
+
+        assert!(fits.pages > 2, "the sample must paginate");
+        assert!(fits.diagnostics.is_empty(), "{:?}", fits.diagnostics);
+        assert_eq!(
+            wraps.pages, fits.pages,
+            "an overflowing band must not repaginate"
+        );
+        assert_eq!(wraps.diagnostics.len(), 1, "{:?}", wraps.diagnostics);
+        let overflow = &wraps.diagnostics[0];
+        assert!(overflow.contains("band-overflow"), "{overflow}");
+        assert!(overflow.contains("footer"), "{overflow}");
+        assert!(
+            overflow.contains(&format!("(pages {})", wraps.pages)),
+            "{overflow}"
+        );
     }
 }

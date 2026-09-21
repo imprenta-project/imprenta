@@ -20,7 +20,8 @@ export interface Edges {
  * message would be its own small cruelty.
  */
 export interface IrBand {
-  height: number;
+  /** Left out, not `undefined`: the engine reads an absent height as "measure me". */
+  height?: number;
   children: IrNode[];
 }
 

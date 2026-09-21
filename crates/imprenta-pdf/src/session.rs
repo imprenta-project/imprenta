@@ -126,16 +126,18 @@ impl Session {
         if assets.fonts.is_empty() {
             return Err(BuildError::NoFonts);
         }
-        let shaper = Shaper::with_faces(assets.fonts.iter().cloned());
+        let mut shaper = Shaper::with_faces(assets.fonts.iter().cloned());
         let fonts = Fonts::from_shaper(&shaper)?;
         let geometry = Geometry {
             width: page.width,
             height: page.height,
             margin: page.margin,
-            bands: crate::render::Bands {
-                header: bands.header.as_ref().map_or(Pt(0.0), |b| b.height),
-                footer: bands.footer.as_ref().map_or(Pt(0.0), |b| b.height),
-            },
+            bands: crate::build::reserve(
+                &bands,
+                &mut shaper,
+                &assets,
+                page.width - page.margin.horizontal(),
+            ),
         };
         let counting = bands.needs_total();
         let mut composer =
@@ -595,7 +597,7 @@ mod tests {
         let footed = feed(Bands {
             header: None,
             footer: Some(ir::Band {
-                height: Pt(20.0),
+                height: Some(Pt(20.0)),
                 children: vec![ir::Node::Text(ir::Text {
                     runs: vec![ir::Run::new("Pagina {{page}}")],
                     style: ir::TextStyle::default(),
@@ -620,7 +622,7 @@ mod tests {
         // "de 18" must come out as the very bytes the same ledger declared
         // whole produces. Same pagination, same footers, same order.
         let footer = ir::Band {
-            height: Pt(20.0),
+            height: Some(Pt(20.0)),
             children: vec![ir::Node::Text(ir::Text {
                 runs: vec![ir::Run::new("Pagina {{page}} de {{pages}}")],
                 style: ir::TextStyle::default(),
@@ -673,13 +675,80 @@ mod tests {
     }
 
     #[test]
+    fn a_fed_document_measures_an_unsized_band_the_way_the_declared_one_does() {
+        // The session fixes its geometry when it opens, before a row has
+        // arrived, so the band has to be measured there and come to the
+        // number `build` arrives at — or a ledger streamed from a database
+        // paginates differently from the same ledger declared whole.
+        let footer = ir::Band {
+            height: None,
+            children: vec![ir::Node::Text(ir::Text {
+                runs: vec![ir::Run::new(
+                    "Suma y sigue {{closing:total}} · Pagina {{page}}",
+                )],
+                style: ir::TextStyle::default(),
+            })],
+        };
+        let head = head();
+        let declared = build(
+            &ir::Document {
+                page: ir::PageSetup::default(),
+                header: None,
+                footer: Some(footer.clone()),
+                accumulators: vec!["total".into()],
+                children: vec![ir::Node::Table(ir::Table {
+                    columns: head.columns.clone(),
+                    header: head.header.clone(),
+                    rows: rows(0, 1_200),
+                    repeat_header: head.repeat_header,
+                    padding: head.padding,
+                    space_after: head.space_after,
+                })],
+            },
+            &assets(),
+            Options::default(),
+        )
+        .unwrap();
+
+        let mut session = Session::open_with(
+            ir::PageSetup::default(),
+            Bands {
+                header: None,
+                footer: Some(footer),
+            },
+            1,
+            assets(),
+            Options::default(),
+        )
+        .unwrap()
+        .with_accumulator_names(vec!["total".into()]);
+        session.feed(&Chunk::OpenTable(head)).unwrap();
+        for batch in 0..12 {
+            session
+                .feed(&Chunk::Rows(rows(batch * 100, batch * 100 + 100)))
+                .unwrap();
+        }
+        session.feed(&Chunk::CloseTable).unwrap();
+        let fed = session.finish().unwrap();
+
+        assert!(declared.pages > 10, "the sample must paginate");
+        assert!(
+            declared.diagnostics.is_empty(),
+            "{:?}",
+            declared.diagnostics
+        );
+        assert_eq!(fed.pages, declared.pages);
+        assert_eq!(fed.pdf, declared.pdf);
+    }
+
+    #[test]
     fn the_pass_that_counts_a_fed_document_says_nothing_twice() {
         let mut session = Session::open_with(
             ir::PageSetup::default(),
             Bands {
                 header: None,
                 footer: Some(ir::Band {
-                    height: Pt(20.0),
+                    height: Some(Pt(20.0)),
                     children: vec![ir::Node::Text(ir::Text {
                         runs: vec![ir::Run::new("{{page}}/{{pages}}")],
                         style: ir::TextStyle::default(),

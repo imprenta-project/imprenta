@@ -92,6 +92,27 @@ describe('render', () => {
     expect(out.diagnostics).toEqual([]);
   });
 
+  it('reserves for a header the room its content measures when no height is given', async () => {
+    // The engine used to take the author's number and nothing else, and a
+    // logo taller than the number was painted over the first lines of every
+    // page. Through the module too: a `header` with no `height` must move
+    // the flow down, which on a long table is more pages.
+    const branded = { ...roman, images: [{ name: 'logo', data: image('logo.png') }] };
+    const headed = (header: Record<string, unknown> | undefined) =>
+      render(JSON.stringify({ ...JSON.parse(long(400)), header }), branded);
+    // The picture is three to one, so 480 wide is 160 tall.
+    const logo = { children: [{ t: 'image', src: 'logo', width: 480 }] };
+
+    const bare = await headed(undefined);
+    const measured = await headed(logo);
+    const declared = await headed({ ...logo, height: 160 });
+
+    expect(bare.pages).toBeGreaterThan(2);
+    expect(measured.pages).toBeGreaterThan(bare.pages);
+    expect(measured.diagnostics).toEqual([]);
+    expect(Buffer.from(measured.pdf).equals(Buffer.from(declared.pdf))).toBe(true);
+  });
+
   it('tells the caller what it could not draw', async () => {
     const out = await render(
       JSON.stringify({ page, children: [{ t: 'text', runs: [{ text: '日本語' }] }] }),
