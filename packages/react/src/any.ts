@@ -1,5 +1,7 @@
 import type { ReactElement } from 'react';
 import { unwrapTheme } from './element.js';
+import type { IrReceipt } from './escpos/index.js';
+import { toIr as toReceiptIr } from './escpos/receipt.js';
 import type { Instance } from './host.js';
 import { toIr as toDocumentIr } from './pdf/document.js';
 import type { IrDocument } from './pdf/ir.js';
@@ -19,12 +21,15 @@ import { toIr as toWorkbookIr } from './xlsx/workbook.js';
  * only ever writes spreadsheets should not carry the page elements around, and
  * `@imprentajs/react/xlsx` still does not.
  */
-export type Rendered = { format: 'pdf'; ir: IrDocument } | { format: 'xlsx'; ir: IrWorkbook };
+export type Rendered =
+  | { format: 'pdf'; ir: IrDocument }
+  | { format: 'xlsx'; ir: IrWorkbook }
+  | { format: 'escpos'; ir: IrReceipt };
 
 export async function renderAny(element: ReactElement): Promise<Rendered> {
   const container = await reconcile(element);
   const [node, theme] = unwrapTheme(
-    only(container, '<Document> or <Workbook>') as Instance,
+    only(container, '<Document>, <Workbook> or <EscPos>') as Instance,
     'file',
   );
 
@@ -33,9 +38,11 @@ export async function renderAny(element: ReactElement): Promise<Rendered> {
       return { format: 'pdf', ir: toDocumentIr(node, theme) };
     case 'workbook':
       return { format: 'xlsx', ir: toWorkbookIr(node, theme) };
+    case 'escpos':
+      return { format: 'escpos', ir: toReceiptIr(node) };
     default:
       throw new Error(
-        `a file declares a <Document> or a <Workbook> at its root, and this one has a <${node.type}>`,
+        `a file declares a <Document>, <Workbook> or <EscPos> at its root, and this one has a <${node.type}>`,
       );
   }
 }

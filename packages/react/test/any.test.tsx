@@ -51,14 +51,14 @@ describe('renderAny', () => {
 
   it('names what it found when the root is neither', async () => {
     await expect(renderAny(<Text>suelto</Text>)).rejects.toThrow(
-      /<Document> or a <Workbook>.*<text>/s,
+      /<Document>, <Workbook> or <EscPos>.*<text>/s,
     );
   });
 
   it('says so when a component returned nothing at all', async () => {
     const Empty = () => null;
     await expect(renderAny(<Empty />)).rejects.toThrow(
-      /expects one <Document> or <Workbook>, and was given 0/,
+      /expects one <Document>, <Workbook> or <EscPos>, and was given 0/,
     );
   });
 });

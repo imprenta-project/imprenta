@@ -4,6 +4,7 @@ import { createServer } from 'vite';
 import { type Context, check, type Finding } from './checks.js';
 import type { Loaded } from './config.js';
 import { findDocuments, previewProps } from './documents.js';
+import { receiptChecks } from './receipts.js';
 import { checkWorkbook, refuse } from './sheets.js';
 
 export interface BuildOptions {
@@ -17,7 +18,7 @@ export interface BuildOptions {
 export interface BuiltDocument {
   id: string;
   /** Which of the two it turned out to declare. */
-  format: 'pdf' | 'xlsx';
+  format: 'pdf' | 'xlsx' | 'escpos';
   path?: string;
   /** Pages, for a document. Sheets, for a workbook. */
   parts: number;
@@ -179,6 +180,21 @@ async function one(
   // `factura.tsx` in different folders overwrite each other, silently.
   const path = join(out, `${document.id}.${rendered.format}`);
   await mkdir(dirname(path), { recursive: true });
+
+  if (rendered.format === 'escpos') {
+    const { render } = await import('@imprentajs/escpos');
+    const built = await render(rendered.ir, { images: assets.images });
+    await writeFile(path, built.escpos);
+    return {
+      id: document.id,
+      format: 'escpos',
+      path,
+      parts: built.tickets,
+      bytes: built.bytes,
+      diagnostics: built.diagnostics,
+      checks: receiptChecks(built),
+    };
+  }
 
   if (rendered.format === 'xlsx') {
     // The document rules are not the sheet rules: run them on a workbook

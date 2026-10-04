@@ -84,6 +84,9 @@ importers:
 
   packages/cli:
     dependencies:
+      '@imprentajs/escpos':
+        specifier: workspace:*
+        version: link:../escpos
       '@imprentajs/fonts':
         specifier: workspace:*
         version: link:../fonts
@@ -176,6 +179,22 @@ importers:
         specifier: 'catalog:'
         version: 4.1.10(@types/node@22.20.1)(happy-dom@20.11.1)(vite@8.2.0(@types/node@22.20.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.5))
 
+  packages/escpos:
+    dependencies:
+      '@point-of-sale/receipt-printer-renderer':
+        specifier: 1.1.0
+        version: 1.1.0
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.20.1
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.10(@types/node@22.20.1)(happy-dom@20.11.1)(vite@8.2.0(@types/node@22.20.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.5))
+
   packages/fonts:
     devDependencies:
       '@types/node':
@@ -209,6 +228,9 @@ importers:
         specifier: 0.33.0
         version: 0.33.0(react@19.2.8)
     devDependencies:
+      '@imprentajs/escpos':
+        specifier: workspace:*
+        version: link:../escpos
       '@imprentajs/pdf':
         specifier: workspace:*
         version: link:../pdf
@@ -969,6 +991,18 @@ packages:
 
   '@oxc-project/types@0.142.0':
     resolution: {integrity: sha512-7W+2q5AKQVU36fkaryontrHn3YDt1RyUYXatw9i5H8ocYe2sPKSFB6eS8WNPeRKiN1qAWWZUPm7gwFzJGrccqQ==}
+
+  '@point-of-sale/codepage-encoder@3.0.2':
+    resolution: {integrity: sha512-Sx+0sE/XgPtMUNKScHpwTIZiHNd/+Mg0udACQJVwPsxH9kUAgIkRi9kRlmWBMCruwOJadjKLyKs8MO8Bh+VS/A==}
+
+  '@point-of-sale/receipt-printer-decoder@1.1.0':
+    resolution: {integrity: sha512-a9T4/Hm+/N/wtnLISPiw4/BeGRYb3B7MY9/RYnt28GMS75yEWUzzg99hYmpu0kpiMJqw4bTJsslgj0UgSs3IvA==}
+    engines: {node: '>=18'}
+
+  '@point-of-sale/receipt-printer-renderer@1.1.0':
+    resolution: {integrity: sha512-yquApA7iTBV1Ld4zjeV+PLU4Phvm38sOlvMlkSNwthqqtQDNlDEFaa/FN5PjIepmqBYZSG+K8wLVnioYS4XaUg==}
+    engines: {node: '>=18'}
+    hasBin: true
 
   '@rolldown/binding-android-arm64@1.2.1':
     resolution: {integrity: sha512-02hOeOSryYxVrOIphmLAsqnCJWxwlzFk+pEt/N/i6OgT3lShHO7xGCU5cpgchRDHboAEbSjzgGh+O/u1GswQmA==}
@@ -2212,6 +2246,10 @@ packages:
   kleur@4.1.5:
     resolution: {integrity: sha512-o+NO+8WrRiQEE4/7nwRJhN1HWpVmJm511pBHUxPLtp0BUISzlBplORYSmTclCnJvQq2tKu/sgl3xVpkc7ZWuQQ==}
     engines: {node: '>=6'}
+
+  lean-qr@2.7.4:
+    resolution: {integrity: sha512-tlMPFfqhAAZN7+j/djRSvl/2+AYT2+7RRuyq8bvcbV8gMiENiscquQ9WTfCSyeEdxsVaEB+tU7e9nFZC63BFnQ==}
+    hasBin: true
 
   lightningcss-android-arm64@1.32.0:
     resolution: {integrity: sha512-YK7/ClTt4kAK0vo6w3X+Pnm0D2cf2vPHbhOXdoNti1Ga0al1P4TBZhwjATvjNwLEBCnKvjJc2jQgHXH0NEwlAg==}
@@ -3956,6 +3994,18 @@ snapshots:
 
   '@oxc-project/types@0.142.0': {}
 
+  '@point-of-sale/codepage-encoder@3.0.2': {}
+
+  '@point-of-sale/receipt-printer-decoder@1.1.0':
+    dependencies:
+      '@point-of-sale/codepage-encoder': 3.0.2
+
+  '@point-of-sale/receipt-printer-renderer@1.1.0':
+    dependencies:
+      '@point-of-sale/codepage-encoder': 3.0.2
+      '@point-of-sale/receipt-printer-decoder': 1.1.0
+      lean-qr: 2.7.4
+
   '@rolldown/binding-android-arm64@1.2.1':
     optional: true
 
@@ -5023,6 +5073,8 @@ snapshots:
   kleur@3.0.3: {}
 
   kleur@4.1.5: {}
+
+  lean-qr@2.7.4: {}
 
   lightningcss-android-arm64@1.32.0:
     optional: true

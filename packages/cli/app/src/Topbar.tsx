@@ -129,6 +129,6 @@ export function Topbar({
 }
 
 function noun(report: Report): string {
-  const word = report.format === 'xlsx' ? 'sheet' : 'page';
+  const word = report.format === 'xlsx' ? 'sheet' : report.format === 'escpos' ? 'ticket' : 'page';
   return report.parts === 1 ? word : `${word}s`;
 }

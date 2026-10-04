@@ -39,6 +39,7 @@
     "dev:app": "vite"
   },
   "dependencies": {
+    "@imprentajs/escpos": "workspace:*",
     "@imprentajs/fonts": "workspace:*",
     "@imprentajs/pdf": "workspace:*",
     "@imprentajs/react": "workspace:*",
