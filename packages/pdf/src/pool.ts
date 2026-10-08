@@ -32,6 +32,7 @@ export type { Request };
 export interface Font {
   weight?: 'regular' | 'bold';
   italic?: boolean;
+  family?: string;
   data: Uint8Array;
 }
 
@@ -116,6 +117,7 @@ export class Pool {
             fonts: options.fonts.map((f) => ({
               weight: f.weight,
               italic: f.italic,
+              family: f.family,
               data: copyOf(f.data),
             })),
             images: (options.images ?? []).map((i) => ({ name: i.name, data: copyOf(i.data) })),

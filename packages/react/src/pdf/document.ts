@@ -109,6 +109,23 @@ function page(props: Record<string, unknown>, theme: Theme): IrDocument['page'] 
   };
 }
 
+/**
+ * Only what a section says about its page: what it leaves out is the
+ * document's, field by field, and the engine reads absence that way.
+ */
+function sectionPage(
+  props: Record<string, unknown>,
+  theme: Theme,
+): Record<string, unknown> | undefined {
+  const named = props.size ? SIZES[props.size as keyof typeof SIZES] : undefined;
+  const [w, h] = named ? (props.landscape ? [named[1], named[0]] : named) : [];
+  return prune({
+    width: (props.width as number | undefined) ?? w,
+    height: (props.height as number | undefined) ?? h,
+    margin: edges(props.margin) ?? classes(props, theme).padding,
+  });
+}
+
 function accumulators(props: Record<string, unknown>): { accumulators: string[] } | undefined {
   const declared = props.accumulators as string[] | undefined;
   return declared?.length ? { accumulators: declared } : undefined;
@@ -190,6 +207,25 @@ function block(node: HostNode, theme: Theme): IrNode {
         stroke: props.stroke,
         spaceAfter: props.spaceAfter,
       });
+    case 'section': {
+      const bands = lift(children, theme);
+      return irNode({
+        t: 'section',
+        page: sectionPage(props, theme),
+        // `null` takes the document's band away; absent keeps it.
+        header: props.header === false ? null : bands.found.header,
+        footer: props.footer === false ? null : bands.found.footer,
+        numbering: props.numbering,
+        children: blocks(bands.rest, theme),
+      });
+    }
+    case 'anchor':
+      return irNode({
+        t: 'anchor',
+        id: props.id as string,
+        bookmark: props.bookmark,
+        level: props.level,
+      });
     case 'link': {
       if (children.length !== 1) {
         throw new Error(
@@ -208,6 +244,8 @@ interface Inherited {
   weight?: 'bold';
   italic?: true;
   color?: string;
+  /** `''` is the default family, written down so a span can return to it. */
+  family?: string;
 }
 
 /**
@@ -238,6 +276,7 @@ function inherited(props: Record<string, unknown>, theme: Theme): Inherited {
   return {
     ...(styled.weight === 'bold' ? { weight: 'bold' as const } : {}),
     ...(styled.italic ? { italic: true as const } : {}),
+    ...(typeof props.family === 'string' ? { family: props.family } : {}),
   };
 }
 
@@ -254,6 +293,7 @@ function inline(node: HostNode, style: Inherited, out: Run[], theme: Theme): voi
     ...(styled.weight === 'bold' ? { weight: 'bold' as const } : {}),
     ...(styled.italic ? { italic: true as const } : {}),
     ...((props.color ?? styled.color) ? { color: (props.color ?? styled.color) as string } : {}),
+    ...(typeof props.family === 'string' ? { family: props.family } : {}),
   };
 
   switch (node.type) {
@@ -281,6 +321,9 @@ function inline(node: HostNode, style: Inherited, out: Run[], theme: Theme): voi
     case 'runningTotal':
       push(out, `{{${(props.at as string) ?? 'closing'}:${props.name as string}}}`, style);
       return;
+    case 'pageOf':
+      push(out, `{{pageof:${props.id as string}}}`, style);
+      return;
     default:
       throw new Error(`a paragraph cannot contain <${node.type}>`);
   }
@@ -303,17 +346,21 @@ function push(out: Run[], text: string, style: Inherited): void {
   if (text === '') {
     return;
   }
+  const { family, ...rest } = style;
+  // The default family is absence in the IR, as every other default is.
+  const run: Run = { text, ...rest, ...(family ? { family } : {}) };
   const last = out[out.length - 1];
   if (
     last &&
-    last.weight === style.weight &&
-    last.italic === style.italic &&
-    last.color === style.color
+    last.weight === run.weight &&
+    last.italic === run.italic &&
+    last.color === run.color &&
+    last.family === run.family
   ) {
     last.text += text;
     return;
   }
-  out.push({ text, ...style });
+  out.push(run);
 }
 
 function textStyle(

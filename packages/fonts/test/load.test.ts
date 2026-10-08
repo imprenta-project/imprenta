@@ -57,6 +57,26 @@ describe('loadFonts', () => {
     expect(fonts[0].data.subarray(0, 4)).toEqual(TTF);
   });
 
+  it('hands a second family over under the name documents ask for it by', async () => {
+    // Google's name for a family is not what a document should have to write
+    // in every run, and a brand's own file has no Google name at all.
+    const own = fileURLToPath(
+      new URL('../../../crates/imprenta-pdf/tests/fonts/RobotoMono-Regular.ttf', import.meta.url),
+    );
+
+    const fonts = await loadFonts(
+      [
+        ...google('Roboto'),
+        ...google('Roboto Mono', { name: 'mono' }),
+        { path: own, name: 'code' },
+      ],
+      { cache: dir(), fetcher: fake() },
+    );
+
+    expect(fonts.map((f) => f.family)).toEqual([undefined, 'mono', 'code']);
+    expect('family' in fonts[0]).toBe(false);
+  });
+
   it('mixes the two in the order they were given', async () => {
     const own = fileURLToPath(
       new URL('../../../crates/imprenta-pdf/tests/fonts/Roboto-Bold.ttf', import.meta.url),

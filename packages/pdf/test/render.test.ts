@@ -59,6 +59,31 @@ describe('render', () => {
     expect(out.diagnostics).toEqual([]);
   });
 
+  it('sets a run in the family its font was handed over under', async () => {
+    const logo = JSON.stringify({
+      page,
+      children: [
+        {
+          t: 'text',
+          runs: [
+            { text: 'llm', family: 'mono' },
+            { text: 'track', family: 'serif' },
+          ],
+        },
+      ],
+    });
+    const fonts = [
+      ...roman.fonts,
+      { weight: 'regular', family: 'mono', data: font('RobotoMono-Regular.ttf') },
+    ];
+
+    const out = await render(logo, { fonts });
+
+    // Mono was handed over and serif was not: one complaint, about serif.
+    expect(out.diagnostics).toHaveLength(1);
+    expect(out.diagnostics[0]).toContain('serif');
+  });
+
   it('takes a second face and uses it for bold runs', async () => {
     const out = await render(
       JSON.stringify({

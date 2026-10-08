@@ -167,6 +167,7 @@ mod tests {
             fonts: vec![FontInput {
                 weight: "regular".into(),
                 italic: false,
+                family: String::new(),
                 data: ROBOTO.to_vec(),
             }],
             images: vec![],

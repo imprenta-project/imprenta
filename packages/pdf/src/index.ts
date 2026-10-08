@@ -32,6 +32,8 @@ export interface FontSource {
   /** `"regular"` or `"bold"`. Defaults to regular. */
   weight?: string;
   italic?: boolean;
+  /** The name a run or a cell asks for it by. Absent is the default family. */
+  family?: string;
   data: Uint8Array;
 }
 
@@ -109,7 +111,7 @@ function keyFor(options: RenderOptions): string {
     String(options.size ?? ''),
     String(options.recycleAbove ?? ''),
     ...options.fonts.map(
-      (f) => `${f.weight ?? 'regular'}/${f.italic ? 'i' : 'r'}/${f.data.length}`,
+      (f) => `${f.family ?? ''}/${f.weight ?? 'regular'}/${f.italic ? 'i' : 'r'}/${f.data.length}`,
     ),
     ...(options.images ?? []).map((i) => `${i.name}/${i.data.length}`),
   ];

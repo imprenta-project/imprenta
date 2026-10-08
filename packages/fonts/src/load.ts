@@ -6,6 +6,8 @@ export interface FontFile {
   path: string;
   weight?: 'regular' | 'bold';
   italic?: boolean;
+  /** The name a document asks for this family by. Absent is the default family. */
+  name?: string;
 }
 
 export type FontSource = FontFile | GoogleFace;
@@ -14,6 +16,8 @@ export type FontSource = FontFile | GoogleFace;
 export interface LoadedFont {
   weight: 'regular' | 'bold';
   italic: boolean;
+  /** Present only for a family other than the default one. */
+  family?: string;
   data: Buffer;
 }
 
@@ -40,6 +44,7 @@ export async function loadFonts(fonts: FontSource[], options: LoadOptions): Prom
     fonts.map(async (font) => ({
       weight: font.weight ?? 'regular',
       italic: font.italic ?? false,
+      ...(font.name === undefined ? {} : { family: font.name }),
       data: isGoogle(font)
         ? await readFile(await cacheGoogleFont(font, options.cache, options.fetcher))
         : await readFile(font.path).catch(() => {

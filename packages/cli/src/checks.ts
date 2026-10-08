@@ -46,8 +46,8 @@ const BAD_DPI = 100;
  * accusing every document of missing every face.
  */
 export interface Context {
-  /** The faces the project configured. */
-  faces?: { weight: 'regular' | 'bold'; italic: boolean }[];
+  /** The faces the project configured. `family` is absent for the default family. */
+  faces?: { weight: 'regular' | 'bold'; italic: boolean; family?: string }[];
   /** Pixel dimensions of the images it configured, by name. */
   images?: Record<string, { width: number; height: number }>;
 }
@@ -75,9 +75,7 @@ export function check(document: unknown, diagnostics: string[], context: Context
         occurrences: 1,
       });
     }
-    for (const child of children) {
-      walk(child, { color: '#000000', background: '#ffffff' }, found, context, room(doc?.page));
-    }
+    flow(children, doc?.page, found, context);
   } catch {
     // A rule must never take the preview down with it. The IR grows, and a
     // shape no rule expected is a gap in the rules, not a broken document.
@@ -135,6 +133,31 @@ function margins(page: Record<string, unknown> | undefined, found: Raw[]): void 
   });
 }
 
+/**
+ * The document's children, and a section's on the page the section declares.
+ *
+ * A section only ever sits at the top of the document or inside another, and
+ * what it leaves out of its page is the document's — the margin as a whole,
+ * as the engine reads it.
+ */
+function flow(
+  nodes: unknown[],
+  page: Record<string, unknown> | undefined,
+  found: Raw[],
+  context: Context,
+): void {
+  for (const node of nodes) {
+    const it = node as Record<string, unknown> | null;
+    if (it?.t === 'section') {
+      const own = (it.page ?? {}) as Record<string, unknown>;
+      margins(own, found);
+      flow((it.children ?? []) as unknown[], { ...page, ...own }, found, context);
+      continue;
+    }
+    walk(node, { color: '#000000', background: '#ffffff' }, found, context, room(page));
+  }
+}
+
 /** How wide content can be before the page cuts it off. */
 function room(page: Record<string, unknown> | undefined): number {
   const width = typeof page?.width === 'number' ? page.width : 595.2756;
@@ -165,9 +188,10 @@ function walk(
         color?: string;
         weight?: string;
         italic?: boolean;
+        family?: string;
       }[]) {
         faint(run.color ?? color, inherited.background, quote(run.text), found);
-        face(run.weight === 'bold', run.italic === true, quote(run.text), context, found);
+        face(run, quote(run.text), context, found);
       }
       return;
     }
@@ -197,7 +221,9 @@ function walk(
       resolution(it, context, found);
       return;
     case 'link': {
-      if (!/^(https?:|mailto:|tel:)/.test(String(it.href ?? ''))) {
+      // `#name` goes to an anchor in the document; whether there is one is
+      // the engine's to say, as `unknown-anchor`.
+      if (!/^(https?:|mailto:|tel:|#)/.test(String(it.href ?? ''))) {
         found.push({
           rule: 'unopenable-link',
           status: 'warning',
@@ -243,6 +269,7 @@ function table(
       color?: string;
       weight?: string;
       italic?: boolean;
+      family?: string;
     }[];
     // Columns covered, not cells written: a group name over the pair of
     // columns it names is one cell for two, and counting cells called the one
@@ -263,7 +290,7 @@ function table(
     for (const cell of cells) {
       tiny(cell.size ?? 9, 'a table cell', found);
       faint(cell.color ?? inherited.color, behind, quote(cell.text), found);
-      face(cell.weight === 'bold', cell.italic === true, quote(cell.text), context, found);
+      face(cell, quote(cell.text), context, found);
     }
   }
 }
@@ -275,18 +302,33 @@ function table(
  * heading meant to be bold simply is not — and nothing else in the chain
  * mentions it.
  */
-function face(bold: boolean, italic: boolean, what: string, context: Context, found: Raw[]): void {
+function face(
+  asked: { weight?: string; italic?: boolean; family?: string },
+  what: string,
+  context: Context,
+  found: Raw[],
+): void {
+  const bold = asked.weight === 'bold';
+  const italic = asked.italic === true;
   if (!context.faces || (!bold && !italic)) {
     return;
   }
+  // An empty name is the default family, as it is to the engine.
+  const family = asked.family || undefined;
+  const ofFamily = context.faces.filter((face) => (face.family || undefined) === family);
+  // A family with no face at all is the engine's to report, as
+  // `unknown-family`, and one fault is one finding.
+  if (family !== undefined && ofFamily.length === 0) {
+    return;
+  }
   const wanted = { weight: bold ? ('bold' as const) : ('regular' as const), italic };
-  const has = context.faces.some(
+  const has = ofFamily.some(
     (face) => face.weight === wanted.weight && face.italic === wanted.italic,
   );
   if (has) {
     return;
   }
-  const named = `${wanted.weight}${wanted.italic ? ' italic' : ''}`;
+  const named = `${family === undefined ? '' : `${family} `}${wanted.weight}${wanted.italic ? ' italic' : ''}`;
   found.push({
     rule: 'missing-face',
     status: 'warning',

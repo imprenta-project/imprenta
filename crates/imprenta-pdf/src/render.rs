@@ -205,6 +205,12 @@ impl PageSink {
         })
     }
 
+    /// Paints the pages that follow on `geometry`. The writer takes a size
+    /// per page, so nothing already written is touched.
+    pub(crate) fn set_geometry(&mut self, geometry: Geometry) {
+        self.geometry = geometry;
+    }
+
     /// Registers `fonts` with the writer.
     ///
     /// Called when the composer is built rather than when the first page is
@@ -352,7 +358,15 @@ impl Fonts {
         if faces.is_empty() {
             return Err(RenderError::UnreadableFont);
         }
-        faces.sort_by_key(|(face, _)| (face.weight != crate::shape::Weight::Regular, face.italic));
+        // The default family first, then by name, so a file with two families
+        // in it comes out the same however the shaper happened to store them.
+        faces.sort_by_key(|(face, _)| {
+            (
+                face.family,
+                face.weight != crate::shape::Weight::Regular,
+                face.italic,
+            )
+        });
         Ok(Self { faces })
     }
 }
@@ -409,33 +423,38 @@ fn paint(
             // The clickable region is an annotation on the page, not part of
             // the content stream, so it is handed over separately.
             let width = link.width.unwrap_or(available);
-            let LinkTarget::Url(url) = &link.target;
-            writer.link(
-                Region {
-                    x: x.get(),
-                    y: y.get(),
-                    width: width.get(),
-                    height: link.content.height().get(),
-                },
-                url,
-            );
+            let region = Region {
+                x: x.get(),
+                y: y.get(),
+                width: width.get(),
+                height: link.content.height().get(),
+            };
+            match &link.target {
+                LinkTarget::Url(url) => writer.link(region, url),
+                LinkTarget::Anchor(name) => writer.link_to(region, name),
+            }
             paint(writer, &link.content, painter, x, y, width);
+        }
+        Content::Anchor(anchor) => {
+            writer.destination(&anchor.id, y.get());
+            if let Some((title, level)) = &anchor.bookmark {
+                writer.bookmark(title, *level, &anchor.id);
+            }
         }
         Content::Empty => {}
     }
 }
 
 /// Draws a canvas's path at `(x, y)`.
+///
+/// A `Fill` or `Stroke` op paints the path traced since the previous one and
+/// starts afresh; what is left at the end takes the canvas's own paint, which
+/// is all a canvas without those ops has ever had.
 fn paint_canvas(writer: &mut PageWriter<'_>, canvas: &CanvasContent, x: Pt, y: Pt) {
-    if canvas.ops.is_empty() || (canvas.fill.is_none() && canvas.stroke.is_none()) {
-        return;
-    }
-
     let (ox, oy) = (x.get(), y.get());
-    let path: Vec<imprenta_pdf_write::PathOp> = canvas
-        .ops
-        .iter()
-        .map(|op| match *op {
+    let mut path: Vec<imprenta_pdf_write::PathOp> = Vec::new();
+    for op in &canvas.ops {
+        path.push(match *op {
             PathOp::MoveTo(px, py) => {
                 imprenta_pdf_write::PathOp::MoveTo(ox + px.get(), oy + py.get())
             }
@@ -451,8 +470,18 @@ fn paint_canvas(writer: &mut PageWriter<'_>, canvas: &CanvasContent, x: Pt, y: P
                 oy + py.get(),
             ),
             PathOp::Close => imprenta_pdf_write::PathOp::Close,
-        })
-        .collect();
+            PathOp::Fill(colour) => {
+                writer.fill(&path, colour);
+                path.clear();
+                continue;
+            }
+            PathOp::Stroke(colour, width) => {
+                writer.stroke(&path, colour, width.get());
+                path.clear();
+                continue;
+            }
+        });
+    }
 
     if let Some(colour) = canvas.fill {
         writer.fill(&path, colour);

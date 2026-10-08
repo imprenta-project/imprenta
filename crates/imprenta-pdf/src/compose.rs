@@ -30,7 +30,7 @@ use crate::content::Content;
 use crate::pack::{Contribution, Flow, Group, Page, Repeat, pack};
 use crate::render::{Fonts, Geometry, Options, PageSink, RenderError};
 use imprenta_core::units::Pt;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 /// What a finished page opened and closed at.
 ///
@@ -50,8 +50,11 @@ pub struct PageTotals {
 /// built per page, and this is what they are built from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageContext {
-    /// One-based, as a reader counts.
-    pub number: usize,
+    /// The number the page carries, as a reader counts — `None` on a page
+    /// that carries none, such as a cover.
+    pub number: Option<usize>,
+    /// Where the page sits in the file, one-based, whatever it is numbered.
+    pub index: usize,
     /// How many pages there are in all — `None` while pages are still being
     /// released, because at that point nobody knows and a guess would print.
     pub total: Option<usize>,
@@ -89,6 +92,38 @@ pub struct PagePlan {
 pub struct Composed {
     pub pdf: imprenta_pdf_write::Pdf,
     pub totals: Vec<PageTotals>,
+    /// How many of those pages carry a number — what `{{pages}}` printed.
+    pub numbered: usize,
+    /// The page each anchor landed on. See [`Anchors::pages`].
+    pub anchors: HashMap<String, Option<usize>>,
+}
+
+/// What a counting pass found out.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Counted {
+    /// The pages a reader counts — the ones that carry a number.
+    pub pages: usize,
+    /// The page each anchor landed on.
+    pub anchors: HashMap<String, Option<usize>>,
+}
+
+/// The places a document names, and the names it asks for.
+///
+/// Kept by the composer because it is the one thing that knows where an atom
+/// landed, and because it lives across every piece of a fed document: a name
+/// given in the first chunk and asked for in the last is one document's.
+#[derive(Debug, Default)]
+struct Anchors {
+    /// Anchors placed whose page is not known yet, by absolute atom, in the
+    /// order they were pushed — which is ascending.
+    pending: VecDeque<(usize, String)>,
+    /// Every name given so far, so that a second one can be refused.
+    named: HashSet<String>,
+    /// Every name a link asked for.
+    wanted: BTreeSet<String>,
+    /// The number of the page each name landed on, as a reader counts it:
+    /// `None` on a page that carries no number.
+    pages: HashMap<String, Option<usize>>,
 }
 
 /// Composes a document page by page, releasing each as it is painted.
@@ -129,6 +164,14 @@ pub struct Composer {
     /// The number this composer's first page carries. One, unless this is a
     /// piece of a document some other composer began.
     first_page: usize,
+    /// Whether the pages now being laid out carry a number, and the number
+    /// the next one that does will carry. A section can switch both.
+    numbered: bool,
+    next_number: usize,
+    /// Pages released that carried a number, which is what `{{pages}}`
+    /// counts: a cover is neither numbered nor counted.
+    counted: usize,
+    anchors: Anchors,
 }
 
 impl Composer {
@@ -163,6 +206,10 @@ impl Composer {
             blind: false,
             total: None,
             first_page: 1,
+            numbered: true,
+            next_number: 1,
+            counted: 0,
+            anchors: Anchors::default(),
         })
     }
 
@@ -185,6 +232,7 @@ impl Composer {
     /// estimating.
     pub fn resuming(mut self, page: usize, total: usize, opening: Vec<f64>) -> Self {
         self.first_page = page;
+        self.next_number = page;
         self.total = Some(total);
         // Neither of the two ways of not knowing the total applies any more.
         // Both are reached first by every wired path — a session opens, sees
@@ -223,6 +271,32 @@ impl Composer {
         self.atoms.push(atom);
         self.contents.push(content);
         index
+    }
+
+    /// Names the place `atom` lands on. `false` if the name was already
+    /// given, in which case the first one stands.
+    pub fn anchor(&mut self, atom: usize, id: &str) -> bool {
+        if !self.anchors.named.insert(id.to_string()) {
+            return false;
+        }
+        self.anchors.pending.push_back((atom, id.to_string()));
+        true
+    }
+
+    /// Records that a link asks for the place `id` names.
+    pub fn wants(&mut self, id: &str) {
+        if !self.anchors.wanted.contains(id) {
+            self.anchors.wanted.insert(id.to_string());
+        }
+    }
+
+    /// The names links asked for that no anchor gave, in order.
+    pub fn unknown_anchors(&self) -> impl Iterator<Item = &str> {
+        self.anchors
+            .wanted
+            .iter()
+            .filter(|id| !self.anchors.named.contains(*id))
+            .map(String::as_str)
     }
 
     /// Adds `value` to a running total when `atom` is placed.
@@ -350,10 +424,50 @@ impl Composer {
     /// The counterpart of [`finish`](Self::finish) for a composer that is
     /// [`counting`](Self::counting): there are no bytes to hand back, and the
     /// only thing the pass was for is this number.
-    pub fn count(mut self) -> usize {
+    pub fn count(mut self) -> Counted {
         let packed = self.pack_pending();
         self.release(&packed, &mut |_| Painted::default());
-        self.totals.len()
+        Counted {
+            pages: self.counted,
+            anchors: self.anchors.pages,
+        }
+    }
+
+    /// Paints and releases every page, the last one too.
+    ///
+    /// For a boundary nothing can reach back across — a section beginning,
+    /// with a page of its own and perhaps a page of another size. What is
+    /// in hand is finished, so it goes now, painted with the bands it was
+    /// laid out under. It goes even from a composer holding its pages: a
+    /// page laid out for one size cannot wait to be painted on another.
+    pub fn drain_with(&mut self, bands: &mut dyn FnMut(&PageContext) -> Painted) {
+        let packed = self.pack_pending();
+        self.release(&packed, bands);
+    }
+
+    /// Lays what comes next out on `geometry`, from a fresh page.
+    ///
+    /// Only between pages: call [`drain_with`](Self::drain_with) first, or
+    /// what is still held would be packed for one page and painted on another.
+    pub fn turn_page(&mut self, geometry: Geometry) {
+        debug_assert!(self.atoms.is_empty(), "the page turned under held atoms");
+        self.geometry = geometry;
+        self.sink.set_geometry(geometry);
+    }
+
+    /// Whether the pages laid out from here on carry a number.
+    pub fn number_pages(&mut self, numbered: bool) {
+        self.numbered = numbered;
+    }
+
+    /// Numbers the next numbered page `from`, and those after it on from it.
+    pub fn restart_numbering(&mut self, from: usize) {
+        self.next_number = from;
+    }
+
+    /// Whether the pages being laid out now carry a number.
+    pub fn numbers_pages(&self) -> bool {
+        self.numbered
     }
 
     /// Paints and releases every page that can no longer change, with no
@@ -425,12 +539,15 @@ impl Composer {
         // exception: it was told, and its own page count is a fraction of the
         // document's.
         if self.total.is_none() {
-            self.total = Some(self.totals.len() + packed.len());
+            let more = if self.numbered { packed.len() } else { 0 };
+            self.total = Some(self.counted + more);
         }
         self.release(&packed, bands);
         Ok(Composed {
             pdf: self.sink.finish()?,
             totals: self.totals,
+            numbered: self.counted,
+            anchors: self.anchors.pages,
         })
     }
 
@@ -440,6 +557,24 @@ impl Composer {
         let mut highest = None;
 
         for page in pages {
+            let index = self.first_page + self.totals.len();
+            let number = self.numbered.then(|| {
+                self.counted += 1;
+                self.next_number += 1;
+                self.next_number - 1
+            });
+            // Every anchor up to the last atom on this page landed on it.
+            // Asked of the few anchors there are rather than of every
+            // placement, so a ledger with none pays one comparison a page.
+            if let Some(last) = page.placements.last().map(|p| p.atom) {
+                while let Some((atom, _)) = self.anchors.pending.front()
+                    && *atom <= last
+                {
+                    if let Some((_, id)) = self.anchors.pending.pop_front() {
+                        self.anchors.pages.insert(id, number);
+                    }
+                }
+            }
             // A counting pass skips both the bands and the paint. The bands
             // are skipped because building one shapes text, once per page,
             // for glyphs nobody will look at; the paint because the whole
@@ -448,7 +583,8 @@ impl Composer {
                 let contents = &self.contents;
                 let prefixes = &self.prefixes;
                 let painted = bands(&PageContext {
-                    number: self.first_page + self.totals.len(),
+                    number,
+                    index,
                     total: self.total,
                     opening: page.opening.clone(),
                     closing: page.closing.clone(),
@@ -534,7 +670,8 @@ impl Composer {
                 .with_groups(&groups)
                 .with_accumulators(self.accumulators, &contributions)
                 .continuing_from(&self.carried)
-                .resuming(&started),
+                .resuming(&started)
+                .after_pages(self.first_page - 1 + self.totals.len()),
             self.geometry.content_height(),
         );
 
@@ -966,10 +1103,13 @@ mod bands {
         let mut seen = Vec::new();
         let pdf = composer
             .finish_with(&mut |page: &PageContext| {
-                seen.push(page.number);
+                seen.push(page.number.unwrap());
                 Painted {
                     header: None,
-                    footer: Some(line(&mut shaper, &format!("pagina {}", page.number))),
+                    footer: Some(line(
+                        &mut shaper,
+                        &format!("pagina {}", page.number.unwrap()),
+                    )),
                 }
             })
             .unwrap();
@@ -994,7 +1134,7 @@ mod bands {
         let mut carried = Vec::new();
         composer
             .finish_with(&mut |page: &PageContext| {
-                carried.push((page.number, page.opening[0], page.closing[0]));
+                carried.push((page.number.unwrap(), page.opening[0], page.closing[0]));
                 Painted::default()
             })
             .unwrap();
@@ -1110,7 +1250,7 @@ mod bands {
         let mut seen = Vec::new();
         composer
             .finish_with(&mut |page: &PageContext| {
-                seen.push((page.number, page.total, page.opening[0]));
+                seen.push((page.number.unwrap(), page.total, page.opening[0]));
                 Painted::default()
             })
             .unwrap();
@@ -1189,7 +1329,7 @@ mod bands {
         }
         let whole_pages = whole
             .finish_with(&mut |page: &PageContext| {
-                whole_numbers.push(page.number);
+                whole_numbers.push(page.number.unwrap());
                 Painted::default()
             })
             .unwrap()
@@ -1218,7 +1358,7 @@ mod bands {
         }
         let tail_pages = tail
             .finish_with(&mut |page: &PageContext| {
-                tail_numbers.push(page.number);
+                tail_numbers.push(page.number.unwrap());
                 Painted::default()
             })
             .unwrap()

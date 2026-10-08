@@ -259,6 +259,59 @@ describe('check', () => {
 
       expect(found).toEqual([]);
     });
+
+    it('accepts a link to a place in the document', () => {
+      // `#resumen` goes to an anchor; the engine itself says when there is
+      // no anchor of that name, as `unknown-anchor`.
+      const found = check(
+        document([
+          { t: 'link', href: '#resumen', child: { t: 'text', runs: [{ text: 'a' }] } },
+          { t: 'anchor', id: 'resumen' },
+          ...some,
+        ]),
+        [],
+      );
+
+      expect(found).toEqual([]);
+    });
+  });
+
+  describe('sections', () => {
+    it('are checked like the rest of the document', () => {
+      const found = check(
+        document([
+          { t: 'section', children: [{ t: 'text', runs: [{ text: 'x' }], style: { size: 4 } }] },
+        ]),
+        [],
+      );
+
+      expect(rules(found)).toEqual(['tiny-text']);
+    });
+
+    it('have their own margins checked', () => {
+      const found = check(
+        document([{ t: 'section', page: { margin: { top: 2 } }, children: some }]),
+        [],
+      );
+
+      expect(rules(found)).toEqual(['unprintable-margin']);
+    });
+
+    it('measure what fits against their own page', () => {
+      // A box that fits the document's page and not the section's narrower one.
+      const found = check(
+        document([
+          {
+            t: 'section',
+            page: { width: 200, margin: { left: 20, right: 20 } },
+            children: [{ t: 'box', style: { width: 300 }, children: some }],
+          },
+        ]),
+        [],
+      );
+
+      expect(rules(found)).toEqual(['wider-than-the-page']);
+    });
   });
 
   describe('what the engine itself noticed', () => {
@@ -385,6 +438,37 @@ describe('check', () => {
         document([{ t: 'text', runs: [{ text: 'TOTAL', weight: 'bold' }] }]),
         [],
         { faces: [...faces, { weight: 'bold' as const, italic: false }] },
+      );
+
+      expect(found).toEqual([]);
+    });
+
+    it('looks for the face in the family the run names', () => {
+      // Bold sans is configured and bold mono is not: a bold run in mono is
+      // set in mono's regular, which is what the author has to hear.
+      const found = check(
+        document([{ t: 'text', runs: [{ text: 'llm', weight: 'bold', family: 'mono' }] }]),
+        [],
+        {
+          faces: [
+            ...faces,
+            { weight: 'bold' as const, italic: false },
+            { weight: 'regular' as const, italic: false, family: 'mono' },
+          ],
+        },
+      );
+
+      expect(rules(found)).toEqual(['missing-face']);
+      expect(found[0].detail).toContain('mono');
+    });
+
+    it('leaves a family the project never configured to the engine', () => {
+      // The engine reports that one itself, as `unknown-family`; saying it
+      // twice would be two findings for one fault.
+      const found = check(
+        document([{ t: 'text', runs: [{ text: 'llm', weight: 'bold', family: 'serif' }] }]),
+        [],
+        { faces },
       );
 
       expect(found).toEqual([]);

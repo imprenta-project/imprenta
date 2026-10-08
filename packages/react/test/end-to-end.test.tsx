@@ -2,15 +2,24 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { render as toPdf } from '@imprentajs/pdf';
+import { Fragment } from 'react';
 import { describe, expect, it } from 'vitest';
 import {
+  Anchor,
   B,
   Box,
   Document,
+  Footer,
   Image,
+  Link,
   List,
+  PageBreak,
+  PageCount,
+  PageNumber,
+  PageOf,
   Row,
   render,
+  Section,
   Span,
   Table,
   Text,
@@ -277,5 +286,80 @@ describe('React to PDF', () => {
     );
 
     expect(out.diagnostics.join(' ')).toContain('missing-glyph');
+  });
+
+  it('prints a report with a cover, a contents page that links, and an outline', async () => {
+    const chapters = ['Resumen', 'Modelos', 'Costes'];
+    const out = await toPdf(
+      await render(
+        <Document>
+          <Footer>
+            <Text>
+              Página <PageNumber /> de <PageCount />
+            </Text>
+          </Footer>
+          <Section footer={false} numbering="none" margin={72}>
+            <Text size={28}>Informe de uso</Text>
+          </Section>
+          {chapters.map((title) => (
+            <Link key={title} href={`#${title}`}>
+              <Text>
+                {title} · <PageOf id={title} />
+              </Text>
+            </Link>
+          ))}
+          {chapters.map((title) => (
+            <Fragment key={title}>
+              <PageBreak />
+              <Anchor id={title} bookmark={title} />
+              <Text>{title}</Text>
+            </Fragment>
+          ))}
+        </Document>,
+      ),
+      assets,
+    );
+    const file = Buffer.from(out.pdf).toString('latin1');
+
+    expect(out.diagnostics).toEqual([]);
+    // The cover, the contents, and a page a chapter.
+    expect(out.pages).toBe(5);
+    expect(file.match(/\/S \/GoTo/g)).toHaveLength(3);
+    expect(file).toContain('/Type /Outlines');
+  });
+
+  it('sets a run in a second family, and says when one was never handed over', async () => {
+    const withMono = {
+      ...assets,
+      fonts: [
+        ...assets.fonts,
+        { weight: 'regular', family: 'mono', data: font('RobotoMono-Regular.ttf') },
+      ],
+    };
+
+    const out = await toPdf(
+      await render(
+        <Document>
+          <Text family="mono">
+            llm<Span family="">track</Span>
+          </Text>
+          <Table columns={[{}]} rows={[{ cells: [{ text: 'ES12', family: 'serif' }] }]} />
+        </Document>,
+      ),
+      withMono,
+    );
+
+    // Two typefaces embedded: mono for "llm", the default for the rest. The
+    // dictionaries naming them are never compressed, so they can be read.
+    const subsets = new Set(
+      Buffer.from(out.pdf)
+        .toString('latin1')
+        .match(/\/BaseFont \/\S+/g),
+    );
+    expect(subsets.size).toBe(2);
+    // Mono was handed over and serif was not: one finding, about serif.
+    expect(out.diagnostics).toHaveLength(1);
+    expect(out.diagnostics[0]).toContain('unknown-family');
+    expect(out.diagnostics[0]).toContain('serif');
   });
 });

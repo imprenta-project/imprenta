@@ -223,6 +223,9 @@ impl Session {
                 names: &self.names,
                 width: self.width,
             },
+            // A fed document has gone by the time a reference could be
+            // answered. See `crate::build::PageOf`.
+            pages: crate::build::PageOf::Unanswerable,
         }
     }
 
@@ -315,6 +318,7 @@ impl Session {
         if let Some(chunks) = self.replay.take() {
             return self.count_then_paint(chunks);
         }
+        crate::build::report_unknown_anchors(&self.composer, &mut self.diagnostics);
         let Session {
             mut shaper,
             assets,
@@ -330,9 +334,12 @@ impl Session {
             &mut shaper,
             &assets,
             &mut diagnostics,
-            &bands,
-            &names,
-            width,
+            BandSpec {
+                bands: &bands,
+                names: &names,
+                width,
+            },
+            crate::build::PageOf::Unanswerable,
         )?;
         Ok(Built {
             pages: composed.totals.len(),
@@ -362,7 +369,7 @@ impl Session {
             ..
         } = self;
 
-        let total = composer.count();
+        let total = composer.count().pages;
         // The shaper carries on into the second pass rather than being built
         // again: its faces are the parsed font files, and a second copy of
         // those would be embedded as a second subset.
@@ -484,6 +491,86 @@ mod tests {
 
         assert_eq!(fed.pages, declared.pages);
         assert_eq!(fed.pdf, declared.pdf);
+    }
+
+    #[test]
+    fn a_section_fed_in_pieces_is_the_section_declared() {
+        // A cover with no footer, then a ledger whose rows arrive in batches.
+        // The section drains and switches pages in the walk both paths share,
+        // so the bytes must not be able to tell which way it came.
+        let footer = ir::Band {
+            height: None,
+            children: vec![ir::Node::Text(ir::Text {
+                runs: vec![ir::Run::new("Pagina {{page}}")],
+                style: ir::TextStyle::default(),
+            })],
+        };
+        let cover = ir::Node::Section(ir::Section {
+            page: Some(ir::SectionPage {
+                margin: Some(imprenta_core::units::Edges::all(Pt(72.0))),
+                ..Default::default()
+            }),
+            header: None,
+            footer: Some(None),
+            numbering: ir::Numbering::None,
+            children: vec![ir::Node::Text(ir::Text {
+                runs: vec![ir::Run::new("Portada")],
+                style: ir::TextStyle::default(),
+            })],
+        });
+        let mut declared = whole(400);
+        declared.footer = Some(footer.clone());
+        declared.children.insert(0, cover.clone());
+
+        let mut session = Session::open_with(
+            ir::PageSetup::default(),
+            Bands {
+                header: None,
+                footer: Some(footer),
+            },
+            0,
+            assets(),
+            Options::default(),
+        )
+        .unwrap();
+        session.feed(&Chunk::Nodes(vec![cover])).unwrap();
+        session.feed(&Chunk::OpenTable(head())).unwrap();
+        for from in (0..400).step_by(50) {
+            session.feed(&Chunk::Rows(rows(from, from + 50))).unwrap();
+        }
+        session.feed(&Chunk::CloseTable).unwrap();
+        let fed = session.finish().unwrap();
+
+        let declared = build(&declared, &assets(), Options::default()).unwrap();
+        assert!(declared.pages > 2);
+        assert_eq!(fed.pdf, declared.pdf);
+    }
+
+    #[test]
+    fn a_page_reference_in_a_fed_document_says_it_cannot_be_answered() {
+        // The place it points at may not have been read yet, and the pieces
+        // before it are gone by the time it has. Printing the token as it was
+        // written would look like a mistake in the document; printing a guess
+        // would be a wrong number. So it prints nothing and says why.
+        let mut session =
+            Session::open(ir::PageSetup::default(), 0, assets(), Options::default()).unwrap();
+        session
+            .feed(&Chunk::Nodes(vec![ir::Node::Text(ir::Text {
+                runs: vec![ir::Run::new("Ver pagina {{pageof:resumen}}")],
+                style: ir::TextStyle::default(),
+            })]))
+            .unwrap();
+
+        let built = session.finish().unwrap();
+
+        assert!(
+            built
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("page-reference-unavailable")),
+            "{:?}",
+            built.diagnostics
+        );
     }
 
     #[test]

@@ -87,7 +87,7 @@ export async function buildAll(config: Loaded, options: BuildOptions): Promise<B
 }
 
 interface Assets {
-  fonts: { weight: string; italic: boolean; data: Buffer }[];
+  fonts: { weight: string; italic: boolean; family?: string; data: Buffer }[];
   images: { name: string; data: Buffer }[];
 }
 
@@ -102,6 +102,7 @@ function context(assets: Assets): Context {
     faces: assets.fonts.map((font) => ({
       weight: font.weight === 'bold' ? ('bold' as const) : ('regular' as const),
       italic: font.italic,
+      family: font.family,
     })),
     images: Object.fromEntries(
       assets.images.flatMap((image) => {
@@ -140,6 +141,7 @@ async function readAssets(config: Loaded): Promise<Assets> {
       config.fonts.map(async (font) => ({
         weight: font.weight,
         italic: font.italic,
+        family: font.family,
         data: await readFile(font.path).catch(() => {
           throw new Error(`the font at ${font.path} could not be read`);
         }),
@@ -217,7 +219,12 @@ async function one(
 
   const { render: toPdf } = await import('@imprentajs/pdf');
   const built = await toPdf(JSON.stringify(rendered.ir), {
-    fonts: assets.fonts.map((f) => ({ weight: f.weight, italic: f.italic, data: f.data })),
+    fonts: assets.fonts.map((f) => ({
+      weight: f.weight,
+      italic: f.italic,
+      family: f.family,
+      data: f.data,
+    })),
     images: assets.images,
   });
   await writeFile(path, built.pdf);

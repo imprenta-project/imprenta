@@ -154,30 +154,38 @@ pub extern "C" fn imprenta_assets_reset() -> i32 {
     succeed()
 }
 
-/// Adds a typeface. `weight` is `"regular"` or `"bold"`; `italic` is 0 or 1.
+/// Adds a typeface. `weight` is `"regular"` or `"bold"`; `italic` is 0 or 1;
+/// `family` is the name runs ask for it by, and empty for the default family.
 ///
 /// # Safety
 ///
-/// Both pointers must point at their stated number of readable bytes.
+/// Every pointer must point at its stated number of readable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn imprenta_assets_font(
     weight_ptr: *const u8,
     weight_len: usize,
     italic: i32,
+    family_ptr: *const u8,
+    family_len: usize,
     data_ptr: *const u8,
     data_len: usize,
 ) -> i32 {
-    let weight = match std::str::from_utf8(unsafe { bytes(weight_ptr, weight_len) }) {
-        Ok(s) => s.to_owned(),
-        Err(e) => {
-            return fail(JobError::Malformed(format!(
-                "the font weight is not text: {e}"
-            )));
-        }
+    let text = |ptr, len, what: &str| {
+        std::str::from_utf8(unsafe { bytes(ptr, len) })
+            .map(str::to_owned)
+            .map_err(|e| JobError::Malformed(format!("the font {what} is not text: {e}")))
+    };
+    let (weight, family) = match (
+        text(weight_ptr, weight_len, "weight"),
+        text(family_ptr, family_len, "family"),
+    ) {
+        (Ok(weight), Ok(family)) => (weight, family),
+        (Err(e), _) | (_, Err(e)) => return fail(e),
     };
     let font = FontInput {
         weight,
         italic: italic != 0,
+        family,
         data: unsafe { bytes(data_ptr, data_len) }.to_vec(),
     };
     // Checked now rather than at render time, so a typo in a weight is found
@@ -686,7 +694,9 @@ mod tests {
         let weight = put(b"regular");
         let data = put(ROBOTO);
         assert_eq!(
-            unsafe { imprenta_assets_font(weight.0, weight.1, 0, data.0, data.1) },
+            unsafe {
+                imprenta_assets_font(weight.0, weight.1, 0, std::ptr::null(), 0, data.0, data.1)
+            },
             OK
         );
         give_back(weight);
@@ -810,7 +820,9 @@ mod tests {
         let data = put(ROBOTO);
 
         assert_eq!(
-            unsafe { imprenta_assets_font(weight.0, weight.1, 0, data.0, data.1) },
+            unsafe {
+                imprenta_assets_font(weight.0, weight.1, 0, std::ptr::null(), 0, data.0, data.1)
+            },
             FAILED
         );
 

@@ -182,6 +182,9 @@ pub enum PathOp {
     /// Cubic Bézier: two control points and an end point.
     CurveTo(Pt, Pt, Pt, Pt, Pt, Pt),
     Close,
+    /// Paints the path since the previous paint, and starts a new one.
+    Fill(Color),
+    Stroke(Color, Pt),
 }
 
 /// A shape drawn from raw path operations.
@@ -262,6 +265,10 @@ pub enum Content {
     Link(Box<LinkContent>),
     /// A decorated rectangle, with content inside it.
     Box(BoxContent),
+    /// A named place, which takes no room and paints nothing: the page it is
+    /// painted on is where a link to it goes. Boxed because it is rare and
+    /// every other piece of content would otherwise carry its size.
+    Anchor(Box<AnchorContent>),
     /// Occupies space and paints nothing — spacing, and the placeholder for
     /// an atom whose content has not been supplied.
     Empty,
@@ -276,7 +283,7 @@ impl Content {
             Self::Image(i) => i.height,
             Self::Canvas(c) => c.height,
             Self::Link(l) => l.content.height(),
-            Self::Empty => Pt(0.0),
+            Self::Anchor(_) | Self::Empty => Pt(0.0),
         }
     }
 }
@@ -309,6 +316,8 @@ pub struct LinkContent {
 pub enum LinkTarget {
     /// An address outside the document.
     Url(String),
+    /// A place in it, by the name an anchor gave it.
+    Anchor(String),
 }
 
 impl LinkContent {
@@ -320,10 +329,27 @@ impl LinkContent {
         }
     }
 
+    /// A link to the place an anchor named `name`, wherever it lands.
+    pub fn anchor(name: impl Into<String>, content: Content) -> Self {
+        Self {
+            target: LinkTarget::Anchor(name.into()),
+            content,
+            width: None,
+        }
+    }
+
     pub fn with_width(mut self, width: Pt) -> Self {
         self.width = Some(width);
         self
     }
+}
+
+/// What an anchor leaves on the page it lands on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnchorContent {
+    pub id: String,
+    /// Its outline entry's title, and how deep the entry sits.
+    pub bookmark: Option<(String, u8)>,
 }
 
 impl From<ImageContent> for Content {

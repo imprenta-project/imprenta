@@ -31,6 +31,8 @@ export interface Font {
   /** Defaults to regular. */
   weight?: 'regular' | 'bold';
   italic?: boolean;
+  /** The name a run or a cell asks for it by. Absent is the default family. */
+  family?: string;
   data: Uint8Array;
 }
 
@@ -245,15 +247,25 @@ export class Engine {
     check(this.e, this.memory, this.e.imprenta_assets_reset());
     for (const font of options.fonts) {
       const weight = this.memory.writeText(font.weight ?? 'regular');
+      const family = this.memory.writeText(font.family ?? '');
       const data = this.memory.write(font.data);
       try {
         check(
           this.e,
           this.memory,
-          this.e.imprenta_assets_font(weight[0], weight[1], font.italic ? 1 : 0, data[0], data[1]),
+          this.e.imprenta_assets_font(
+            weight[0],
+            weight[1],
+            font.italic ? 1 : 0,
+            family[0],
+            family[1],
+            data[0],
+            data[1],
+          ),
         );
       } finally {
         this.memory.free(weight);
+        this.memory.free(family);
         this.memory.free(data);
       }
     }

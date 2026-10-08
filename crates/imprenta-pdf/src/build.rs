@@ -9,13 +9,14 @@
 use crate::atom::{Atom, Break};
 use crate::compose::{Composed, Composer, PageContext, Painted};
 use crate::content::{
-    BoxContent, CanvasContent, Content, ImageContent, ImageFormat, LinkContent, PathOp,
+    AnchorContent, BoxContent, CanvasContent, Content, ImageContent, ImageFormat, LinkContent,
+    PathOp,
 };
 use crate::decoration::{BorderSide, Decoration};
 use crate::ir;
 use crate::list::{List, Marker};
 use crate::render::{Bands, Fonts, Geometry, Options, RenderError};
-use crate::shape::{Face, Shaper, TextRun, Weight, report_missing_in};
+use crate::shape::{Face, Family, Shaper, TextRun, Weight, report_missing_in};
 use crate::table::{Align, Cell, Column, Layout, Overflow, Track, offset_within};
 use imprenta_core::diagnostic::Diagnostics;
 use imprenta_core::image::{ImageError, identify};
@@ -103,6 +104,23 @@ pub enum BuildError {
 /// A footer that only numbers its pages pays none of it.
 pub(crate) fn needs_total(document: &ir::Document) -> bool {
     bands_need_total(document.header.as_ref(), document.footer.as_ref())
+        || sections_need_total(&document.children)
+}
+
+/// As [`needs_total`], for the bands sections declare. Sections sit at the
+/// top of the document or inside one another, so this never goes near a
+/// table's rows.
+fn sections_need_total(nodes: &[ir::Node]) -> bool {
+    nodes.iter().any(|node| match node {
+        ir::Node::Section(section) => {
+            let declared = |band: &Option<Option<ir::Band>>| band.clone().flatten();
+            bands_need_total(
+                declared(&section.header).as_ref(),
+                declared(&section.footer).as_ref(),
+            ) || sections_need_total(&section.children)
+        }
+        _ => false,
+    })
 }
 
 /// As [`needs_total`], for bands held apart from a document.
@@ -154,53 +172,155 @@ pub fn build(
         width,
     };
 
-    let mut composer = Composer::with_options(geometry, fonts.clone(), options)?
-        .with_accumulators(document.accumulators.len());
-    if needs_total(document) {
-        // A document that prints its own length is walked twice: once to
-        // count the pages with nothing painted, then again as a fragment that
-        // happens to be the whole of itself. The alternative — holding every
-        // painted page until the last one is packed — cost twenty-three times
-        // the memory on a ledger, and it is what made a long one trap.
-        //
-        // The second walk is what it costs, and it is cheaper than it sounds:
-        // the counting pass paints nothing, compresses nothing and builds no
-        // bands. Walking the IR twice is free either way, since an IR is
-        // inert data that is already in memory.
-        let total = count_pages(document, assets, geometry, &fonts, width, &mut shaper, band)?;
-        composer = composer.resuming(1, total, Vec::new());
-    }
-    let mut diagnostics = Diagnostics::default();
-
-    {
-        let mut ctx = Walk {
-            shaper: &mut shaper,
-            assets,
-            diagnostics: &mut diagnostics,
-            composer: &mut composer,
-            pending_break: None,
-            band,
-        };
-        for node in &document.children {
-            ctx.node(node, width);
-        }
-    }
-
-    let composed = finish_with_bands(
-        composer,
-        &mut shaper,
+    // A document that prints its own length, or the page something landed
+    // on, is walked twice: once to find out with nothing painted, then again
+    // knowing. The alternative to the first walk — holding every painted page
+    // until the last one is packed — cost twenty-three times the memory on a
+    // ledger, and it is what made a long one trap.
+    //
+    // The second walk is what it costs, and it is cheaper than it sounds: the
+    // counting pass paints nothing, compresses nothing and builds no bands.
+    // Walking the IR twice is free either way, since an IR is inert data that
+    // is already in memory.
+    let paint = Paint {
+        document,
         assets,
-        &mut diagnostics,
-        &declared,
-        &document.accumulators,
+        options,
+        geometry,
+        fonts: &fonts,
         width,
-    )?;
+        band,
+    };
+    let refers = refers_to_pages(document);
+    let total = needs_total(document);
+    let first = if total || refers {
+        let pages = if refers { PageOf::Guess } else { PageOf::Off };
+        Some(paint.count(&mut shaper, pages)?)
+    } else {
+        None
+    };
 
-    Ok(Built {
-        pages: composed.totals.len(),
-        pdf: composed.pdf,
-        diagnostics: diagnostics.iter().map(|d| d.to_string()).collect(),
-    })
+    let Some(mut counted) = first else {
+        return paint.once(&mut shaper, None, PageOf::Off);
+    };
+    if !refers {
+        return paint.once(&mut shaper, Some(counted.pages), PageOf::Off);
+    }
+
+    // A reference is painted with the page the count found, and then checked:
+    // the number it prints is a different width from the guess it was counted
+    // with, and a line that wraps differently can move what comes after it to
+    // another page. It almost never does, so the check is a comparison and
+    // not a third walk; when it has, the document is painted again knowing
+    // where things really went, which settles on the second try in anything
+    // but a contrived case.
+    for attempt in 1.. {
+        let (built, landed) =
+            paint.checked(&mut shaper, total.then_some(counted.pages), &counted)?;
+        let settled =
+            landed.anchors == counted.anchors && (!total || landed.pages == counted.pages);
+        if settled || attempt == 3 {
+            let mut built = built;
+            if !settled {
+                built.diagnostics.push(
+                    imprenta_core::diagnostic::Diagnostic::warning(
+                        "page-reference-moved",
+                        "a page reference kept moving what it refers to; the numbers printed are the last ones tried",
+                    )
+                    .with_hint("give the reference room for its widest number, so it cannot rewrap the text around it")
+                    .to_string(),
+                );
+            }
+            return Ok(built);
+        }
+        counted = landed;
+    }
+    unreachable!("the loop returns by its third attempt")
+}
+
+/// Everything a painting walk is built from, so a document painted twice is
+/// painted the same way twice.
+#[derive(Clone, Copy)]
+struct Paint<'a> {
+    document: &'a ir::Document,
+    assets: &'a Assets,
+    options: Options,
+    geometry: Geometry,
+    fonts: &'a Fonts,
+    width: Pt,
+    band: BandSpec<'a>,
+}
+
+impl Paint<'_> {
+    fn once(
+        &self,
+        shaper: &mut Shaper,
+        total: Option<usize>,
+        pages: PageOf<'_>,
+    ) -> Result<Built, BuildError> {
+        self.walk(shaper, total, pages).map(|(built, _)| built)
+    }
+
+    /// Paints with the pages `counted` found, and says where things landed.
+    fn checked(
+        &self,
+        shaper: &mut Shaper,
+        total: Option<usize>,
+        counted: &crate::compose::Counted,
+    ) -> Result<(Built, crate::compose::Counted), BuildError> {
+        self.walk(shaper, total, PageOf::Known(&counted.anchors))
+    }
+
+    fn walk(
+        &self,
+        shaper: &mut Shaper,
+        total: Option<usize>,
+        pages: PageOf<'_>,
+    ) -> Result<(Built, crate::compose::Counted), BuildError> {
+        let document = self.document;
+        let mut composer = Composer::with_options(self.geometry, self.fonts.clone(), self.options)?
+            .with_accumulators(document.accumulators.len());
+        if let Some(total) = total {
+            composer = composer.resuming(1, total, Vec::new());
+        }
+        let mut diagnostics = Diagnostics::default();
+        {
+            let mut ctx = Walk {
+                shaper: &mut *shaper,
+                assets: self.assets,
+                diagnostics: &mut diagnostics,
+                composer: &mut composer,
+                pending_break: None,
+                band: self.band,
+                pages,
+            };
+            for node in &document.children {
+                ctx.node(node, self.width);
+            }
+        }
+        report_unknown_anchors(&composer, &mut diagnostics);
+
+        let composed = finish_with_bands(
+            composer,
+            shaper,
+            self.assets,
+            &mut diagnostics,
+            self.band,
+            pages,
+        )?;
+        let landed = crate::compose::Counted {
+            pages: composed.numbered,
+            anchors: composed.anchors,
+        };
+        Ok((
+            Built {
+                pages: composed.totals.len(),
+                pdf: composed.pdf,
+                diagnostics: diagnostics.iter().map(|d| d.to_string()).collect(),
+            },
+            landed,
+        ))
+    }
 }
 
 /// How many pages a document runs to, having painted none of them.
@@ -215,39 +335,40 @@ pub fn build(
 /// Its diagnostics are thrown away rather than kept: every one of them will
 /// be reported again by the walk that paints, and a reader told twice that a
 /// font has no glyph for "日" would reasonably conclude there were two.
-fn count_pages(
-    document: &ir::Document,
-    assets: &Assets,
-    geometry: Geometry,
-    fonts: &Fonts,
-    width: Pt,
-    shaper: &mut Shaper,
-    band: BandSpec<'_>,
-) -> Result<usize, BuildError> {
-    // The shaper is the one the second pass will use. Sharing it is not for
-    // the cache — a ledger's rows are all different text and the hit rate on
-    // the second pass is nil — but because building a second one re-reads
-    // every font file for nothing.
-    let mut composer = Composer::with_options(geometry, fonts.clone(), Options::default())?
-        .with_accumulators(document.accumulators.len())
-        .counting();
-    let mut discarded = Diagnostics::default();
-    {
-        let mut ctx = Walk {
-            shaper,
-            assets,
-            diagnostics: &mut discarded,
-            composer: &mut composer,
-            pending_break: None,
-            // Never reached: a counting composer releases its pages without
-            // asking anybody what goes on them.
-            band,
-        };
-        for node in &document.children {
-            ctx.node(node, width);
+impl Paint<'_> {
+    fn count(
+        &self,
+        shaper: &mut Shaper,
+        pages: PageOf<'_>,
+    ) -> Result<crate::compose::Counted, BuildError> {
+        let document = self.document;
+        // The shaper is the one the second pass will use. Sharing it is not
+        // for the cache — a ledger's rows are all different text and the hit
+        // rate on the second pass is nil — but because building a second one
+        // re-reads every font file for nothing.
+        let mut composer =
+            Composer::with_options(self.geometry, self.fonts.clone(), Options::default())?
+                .with_accumulators(document.accumulators.len())
+                .counting();
+        let mut discarded = Diagnostics::default();
+        {
+            let mut ctx = Walk {
+                shaper,
+                assets: self.assets,
+                diagnostics: &mut discarded,
+                composer: &mut composer,
+                pending_break: None,
+                // Never reached: a counting composer releases its pages
+                // without asking anybody what goes on them.
+                band: self.band,
+                pages,
+            };
+            for node in &document.children {
+                ctx.node(node, self.width);
+            }
         }
+        Ok(composer.count())
     }
-    Ok(composer.count())
 }
 
 /// Measures a run of table rows into the atoms the packer will see.
@@ -286,7 +407,12 @@ pub fn measure_rows(
     for batch in rows.chunks(MEASURE_BATCH) {
         let cells: Vec<(Vec<Cell>, Decoration)> = batch
             .iter()
-            .map(|row| (cells_of(row, Pt(9.0)), decoration_of(&row.style)))
+            .map(|row| {
+                (
+                    cells_of(row, Pt(9.0), &shaper, PageOf::Off, &mut diagnostics),
+                    decoration_of(&row.style),
+                )
+            })
             .collect();
         let built = layout.rows_reporting(
             &mut shaper,
@@ -366,18 +492,33 @@ pub fn plan(
     Ok(composer.plan())
 }
 
+/// Says which links lead nowhere, once every anchor has had its chance.
+///
+/// Only at the end: a table of contents links forward to places not walked
+/// yet, so a link cannot be judged when it is met.
+pub(crate) fn report_unknown_anchors(composer: &Composer, diagnostics: &mut Diagnostics) {
+    for id in composer.unknown_anchors() {
+        diagnostics.report(
+            imprenta_core::diagnostic::Diagnostic::warning(
+                "unknown-anchor",
+                format!("a link goes to #{id}, and no anchor is called {id:?}"),
+            )
+            .with_hint("give the place it should go an anchor with that id"),
+        );
+    }
+}
+
 /// Paints the tail, building each page's bands as it goes.
 ///
 /// Shared by the whole-document path and the session, so a header cannot come
 /// out one way when a ledger is declared and another when it is fed.
-pub fn finish_with_bands(
+pub(crate) fn finish_with_bands(
     composer: Composer,
     shaper: &mut Shaper,
     assets: &Assets,
     diagnostics: &mut Diagnostics,
-    bands: &crate::session::Bands,
-    names: &[String],
-    width: Pt,
+    band: BandSpec<'_>,
+    pages: PageOf<'_>,
 ) -> Result<Composed, RenderError> {
     // Built with the shaper the content was measured with: a second shaper
     // would embed a second copy of every font, and set the page numbers in it.
@@ -385,10 +526,11 @@ pub fn finish_with_bands(
         shaper,
         assets,
         diagnostics,
-        bands,
-        names,
-        width,
+        bands: band.bands,
+        names: band.names,
+        width: band.width,
         reserved: composer.geometry().bands,
+        pages,
     };
     composer.finish_with(&mut |page| band_assets.paint(page))
 }
@@ -404,6 +546,7 @@ struct BandAssets<'a> {
     /// The room the geometry set aside for each band, so a page whose band
     /// comes out taller can say so.
     reserved: Bands,
+    pages: PageOf<'a>,
 }
 
 impl BandAssets<'_> {
@@ -433,12 +576,14 @@ impl BandAssets<'_> {
     ) -> Option<Content> {
         let band = band?;
         let filled = fill(band, &mut |token| {
-            resolve(token, page, self.names, self.diagnostics)
+            resolve(token, page, self.names, self.pages, self.diagnostics)
         });
         let boxed = Compose {
             shaper: self.shaper,
             assets: self.assets,
             diagnostics: self.diagnostics,
+            // Filled above, tokens and references alike.
+            pages: PageOf::Off,
         }
         .band(&filled, self.width);
 
@@ -461,7 +606,7 @@ impl BandAssets<'_> {
                         reserved.get()
                     ),
                 )
-                .on_page(page.number as u32)
+                .on_page(page.index as u32)
                 .with_hint("give the band a `height` with room for its widest page"),
             );
         }
@@ -515,6 +660,128 @@ fn fill_node(node: &ir::Node, word: &mut dyn FnMut(&str) -> String) -> ir::Node 
     }
 }
 
+/// What `{{pageof:id}}` turns into while a document is walked.
+///
+/// A reference points at a place the walk may not have reached — a table of
+/// contents comes before its chapters — so it is answered by a walk that
+/// already went: see [`build`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PageOf<'a> {
+    /// The document asks for none, and text goes through untouched. Every
+    /// document that does not use them pays nothing for them.
+    Off,
+    /// A document fed in pieces, which has no second walk: what a reference
+    /// points at may not have arrived, and what came before it is gone. It
+    /// prints nothing and says so, rather than a wrong number.
+    Unanswerable,
+    /// The pages are not known yet, so a reference stands in at a typical
+    /// width: a page number of three digits.
+    Guess,
+    /// What a walk found: the number each anchor's page carries, `None` for
+    /// one that carries none.
+    Known(&'a HashMap<String, Option<usize>>),
+}
+
+/// `text` with every `{{pageof:id}}` in it replaced by that page's number.
+///
+/// Every other token is left as written. In the flow they are literal text
+/// — `{{page}}` means something only in a band — and in a band they are
+/// filled after this, by [`resolve`].
+fn refer<'t>(
+    text: &'t str,
+    pages: PageOf<'_>,
+    diagnostics: &mut Diagnostics,
+) -> std::borrow::Cow<'t, str> {
+    if matches!(pages, PageOf::Off) || !text.contains("{{pageof:") {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(substitute(
+        text,
+        &mut |token| match token.strip_prefix("pageof:") {
+            Some(id) => page_of(id.trim(), pages, diagnostics),
+            None => format!("{{{{{token}}}}}"),
+        },
+    ))
+}
+
+/// The number the page `id` landed on carries, as text.
+fn page_of(id: &str, pages: PageOf<'_>, diagnostics: &mut Diagnostics) -> String {
+    let known = match pages {
+        PageOf::Off => return format!("{{{{pageof:{id}}}}}"),
+        PageOf::Guess => return "999".into(),
+        PageOf::Unanswerable => {
+            diagnostics.report(
+                imprenta_core::diagnostic::Diagnostic::warning(
+                    "page-reference-unavailable",
+                    format!("a reference asks for the page of {id:?} in a document fed in pieces, which cannot know it"),
+                )
+                .with_hint("render the document whole to print where things landed"),
+            );
+            return String::new();
+        }
+        PageOf::Known(known) => known,
+    };
+    match known.get(id) {
+        Some(Some(number)) => number.to_string(),
+        Some(None) => {
+            diagnostics.report(
+                imprenta_core::diagnostic::Diagnostic::warning(
+                    "unnumbered-page",
+                    format!("a reference asks for the page of {id:?}, which carries no number"),
+                )
+                .with_hint("point it at a place in a numbered section"),
+            );
+            String::new()
+        }
+        None => {
+            diagnostics.report(
+                imprenta_core::diagnostic::Diagnostic::warning(
+                    "unknown-anchor",
+                    format!(
+                        "a reference asks for the page of {id:?}, and no anchor is called that"
+                    ),
+                )
+                .with_hint("give the place it should point at an anchor with that id"),
+            );
+            String::new()
+        }
+    }
+}
+
+/// Whether the document prints the page anything landed on.
+///
+/// Read through once, up front, for the one string that can only mean that.
+/// It is a search of the document's text and not a walk of it — nothing is
+/// shaped or measured — and a document that never asks is walked once.
+fn refers_to_pages(document: &ir::Document) -> bool {
+    fn asks(text: &str) -> bool {
+        text.contains("{{pageof:")
+    }
+    fn band(band: Option<&ir::Band>) -> bool {
+        band.is_some_and(|b| nodes(&b.children))
+    }
+    fn nodes(list: &[ir::Node]) -> bool {
+        list.iter().any(|node| match node {
+            ir::Node::Text(text) => text.runs.iter().any(|run| asks(&run.text)),
+            ir::Node::Box(c) | ir::Node::Row(c) => nodes(&c.children),
+            ir::Node::Link(link) => nodes(std::slice::from_ref(&link.child)),
+            ir::Node::List(list) => list.items.iter().any(|item| asks(item)),
+            ir::Node::Table(table) => table
+                .header
+                .iter()
+                .chain(&table.rows)
+                .any(|row| row.cells.iter().any(|cell| asks(&cell.text))),
+            ir::Node::Section(section) => {
+                band(section.header.clone().flatten().as_ref())
+                    || band(section.footer.clone().flatten().as_ref())
+                    || nodes(&section.children)
+            }
+            _ => false,
+        })
+    }
+    band(document.header.as_ref()) || band(document.footer.as_ref()) || nodes(&document.children)
+}
+
 /// One string, with every `{{token}}` replaced by the word given for it.
 fn substitute(text: &str, word: &mut dyn FnMut(&str) -> String) -> String {
     let mut out = String::with_capacity(text.len());
@@ -545,6 +812,7 @@ fn substitute(text: &str, word: &mut dyn FnMut(&str) -> String) -> String {
 fn widest(token: &str) -> String {
     match token.split_once(':') {
         Some(("opening" | "closing", _)) => format(-999_999_999.99),
+        Some(("pageof", _)) => "99999".into(),
         _ => match token {
             "page" | "pages" => "99999".into(),
             _ => String::new(),
@@ -579,6 +847,7 @@ pub(crate) fn reserve(
             shaper,
             assets,
             diagnostics: &mut discarded,
+            pages: PageOf::Off,
         }
         .band(&filled, width)
         .height();
@@ -599,6 +868,7 @@ fn resolve(
     token: &str,
     page: &PageContext,
     names: &[String],
+    pages: PageOf<'_>,
     diagnostics: &mut Diagnostics,
 ) -> String {
     let mut total = |name: &str, values: &[f64]| -> String {
@@ -620,8 +890,10 @@ fn resolve(
     match token.split_once(':') {
         Some(("opening", name)) => total(name, &page.opening),
         Some(("closing", name)) => total(name, &page.closing),
+        Some(("pageof", id)) => page_of(id, pages, diagnostics),
         _ => match token {
-            "page" => page.number.to_string(),
+            // Nothing on a page that carries no number, such as a cover.
+            "page" => page.number.map(|n| n.to_string()).unwrap_or_default(),
             // Empty rather than a guess: a document that streams cannot know,
             // and `needs_total` is what stops it being asked.
             "pages" => page.total.map(|t| t.to_string()).unwrap_or_default(),
@@ -632,7 +904,7 @@ fn resolve(
                         format!("a band uses {{{{{other}}}}}, which is not something a page knows"),
                     )
                     .with_hint(
-                        "page, pages, opening:<name> and closing:<name> are the ones there are",
+                        "page, pages, pageof:<anchor>, opening:<name> and closing:<name> are the ones there are",
                     ),
                 );
                 String::new()
@@ -676,8 +948,14 @@ impl Compose<'_> {
     fn runs(&mut self, runs: &[ir::Run], style: ir::TextStyle) -> Vec<TextRun> {
         runs.iter()
             .map(|r| {
-                TextRun::new(&r.text)
-                    .in_face(face_of(r.weight, r.italic))
+                TextRun::new(refer(&r.text, self.pages, self.diagnostics))
+                    .in_face(face_named(
+                        r.weight,
+                        r.italic,
+                        r.family.as_deref(),
+                        self.shaper,
+                        self.diagnostics,
+                    ))
                     .inked(r.color.unwrap_or(style.color))
             })
             .collect()
@@ -786,11 +1064,26 @@ impl Compose<'_> {
             }
             ir::Node::Box(c) => self.container(c, width, false),
             ir::Node::Row(c) => self.container(c, width, true),
+            // Its items stacked in one piece, since inside a box there are no
+            // atoms to give each its own. The space below is padding for the
+            // same reason a paragraph's is, above.
+            ir::Node::List(list) => {
+                let built = list_of(list, width);
+                let mut boxed = BoxContent::default()
+                    .with_width(width)
+                    .with_padding(Edges::bottom(list.style.space_after));
+                for (i, item) in list.items.iter().enumerate() {
+                    let item = refer(item, self.pages, self.diagnostics);
+                    let row = built.item(self.shaper, i, &item, list.style.size, list.style.color);
+                    boxed = boxed.stack(Content::Box(row));
+                }
+                Content::Box(boxed)
+            }
             ir::Node::Link(link) => Content::Link(Box::new(
-                LinkContent::url(link.href.clone(), self.inline(&link.child, width))
-                    .with_width(width),
+                link_content(&link.href, self.inline(&link.child, width)).with_width(width),
             )),
-            // Tables, lists and breaks are block-level; nesting one inside a
+            ir::Node::Anchor(anchor) => anchor_content(anchor),
+            // Tables and breaks are block-level; nesting one inside a
             // row is not something the IR expresses.
             other => {
                 self.diagnostics.report(
@@ -888,6 +1181,7 @@ pub(crate) struct Compose<'a> {
     pub(crate) shaper: &'a mut Shaper,
     pub(crate) assets: &'a Assets,
     pub(crate) diagnostics: &'a mut Diagnostics,
+    pub(crate) pages: PageOf<'a>,
 }
 
 /// What a page's bands are built from, small enough to be copied about.
@@ -932,6 +1226,8 @@ pub(crate) struct Walk<'a> {
     /// A break declared by a `PageBreak` node, applied to whatever comes next.
     pub(crate) pending_break: Option<Break>,
     pub(crate) band: BandSpec<'a>,
+    /// What a `{{pageof:id}}` in the text turns into.
+    pub(crate) pages: PageOf<'a>,
 }
 
 /// How many atoms may pile up before finished pages are painted and dropped.
@@ -955,6 +1251,28 @@ impl Walk<'_> {
         if let Some(kind) = self.pending_break.take() {
             atom.break_before = kind;
         }
+        // An atom cannot be split, so one taller than a whole page is placed
+        // anyway and painted past its foot. The packer is right to do that
+        // rather than look for a page big enough, but it has nowhere to say
+        // so; this is the last place that knows both the height and the page.
+        // The same slack the packer allows, for the same reason.
+        let budget = self.composer.budget();
+        if atom.height.get() > budget.get() + 1e-3 {
+            self.diagnostics.report(
+                imprenta_core::diagnostic::Diagnostic::warning(
+                    "page-overflow",
+                    format!(
+                        "a block {:.1}pt tall cannot fit on a page with {:.1}pt of room, \
+                         and runs past its foot",
+                        atom.height.get(),
+                        budget.get()
+                    ),
+                )
+                .with_hint(
+                    "split it into smaller blocks, or make the page or its contents smaller",
+                ),
+            );
+        }
         let index = self.composer.push(atom, content);
 
         if self.composer.pending() >= FLUSH_EVERY {
@@ -976,6 +1294,7 @@ impl Walk<'_> {
             diagnostics,
             composer,
             band,
+            pages,
             ..
         } = self;
         let mut bands = BandAssets {
@@ -986,13 +1305,49 @@ impl Walk<'_> {
             names: band.names,
             width: band.width,
             reserved: composer.geometry().bands,
+            pages: *pages,
         };
         composer.flush_with(&mut |page| bands.paint(page));
     }
 
+    /// As [`flush`](Self::flush), the last page included. See
+    /// [`Composer::drain_with`].
+    fn drain(&mut self) {
+        let Walk {
+            shaper,
+            assets,
+            diagnostics,
+            composer,
+            band,
+            pages,
+            ..
+        } = self;
+        let mut bands = BandAssets {
+            shaper,
+            assets,
+            diagnostics,
+            bands: band.bands,
+            names: band.names,
+            width: band.width,
+            reserved: composer.geometry().bands,
+            pages: *pages,
+        };
+        composer.drain_with(&mut |page| bands.paint(page));
+    }
+
     fn spacer(&mut self, height: Pt) {
+        self.space_after(height, false);
+    }
+
+    /// The gap below a block, which keeps with what follows whenever the block
+    /// does. Without that the chain ends at the gap: a heading and the room
+    /// under it fit at the foot of a page, and what the heading introduces
+    /// goes overleaf without it.
+    fn space_after(&mut self, height: Pt, keep_with_next: bool) {
         if height.get() > 0.0 {
-            self.emit(Atom::new(height), Content::Empty);
+            let mut atom = Atom::new(height);
+            atom.keep_with_next = keep_with_next;
+            self.emit(atom, Content::Empty);
         }
     }
 
@@ -1021,6 +1376,137 @@ impl Walk<'_> {
             ir::Node::Canvas(canvas) => self.canvas(canvas, width),
             ir::Node::List(list) => self.list(list, width),
             ir::Node::Table(table) => self.table(table, width),
+            ir::Node::Anchor(anchor) => self.anchor(anchor),
+            ir::Node::Section(section) => self.section(section),
+        }
+    }
+
+    /// A section: its own page, bands and numbering, from a fresh page, and
+    /// the ones in force before it from a fresh page after.
+    ///
+    /// The composer is drained on both sides. Nothing the packer does reaches
+    /// across a page boundary that is forced anyway, and a page laid out for
+    /// one size has to be painted on that size, with the bands it was laid
+    /// out under — so everything in hand goes before the switch.
+    fn section(&mut self, section: &ir::Section) {
+        self.drain();
+        let outer = *self.composer.geometry();
+        let numbered = self.composer.numbers_pages();
+
+        let page = section.page.unwrap_or_default();
+        let (width, height) = (
+            page.width.unwrap_or(outer.width),
+            page.height.unwrap_or(outer.height),
+        );
+        let margin = page.margin.unwrap_or(outer.margin);
+        let bands = crate::session::Bands {
+            header: match &section.header {
+                Some(declared) => declared.clone(),
+                None => self.band.bands.header.clone(),
+            },
+            footer: match &section.footer {
+                Some(declared) => declared.clone(),
+                None => self.band.bands.footer.clone(),
+            },
+        };
+        let content = width - margin.horizontal();
+        let geometry = Geometry {
+            width,
+            height,
+            margin,
+            bands: reserve(&bands, self.shaper, self.assets, content),
+        };
+        if width.get() <= 0.0 || height.get() <= 0.0 || geometry.content_height().get() <= 0.0 {
+            // Walked on the page around it rather than refused: the content
+            // is the author's, and losing it is worse than its page.
+            self.diagnostics.report(
+                imprenta_core::diagnostic::Diagnostic::error(
+                    "invalid-page",
+                    format!(
+                        "a section's page is {:.1} by {:.1} pt with no room left inside its margins and bands",
+                        width.get(),
+                        height.get()
+                    ),
+                )
+                .with_hint("give it a page larger than its margins and bands"),
+            );
+            for child in &section.children {
+                self.node(child, outer.width - outer.margin.horizontal());
+            }
+            return;
+        }
+
+        self.composer.turn_page(geometry);
+        match section.numbering {
+            ir::Numbering::Continue => self.composer.number_pages(true),
+            ir::Numbering::None => self.composer.number_pages(false),
+            ir::Numbering::Restart(from) => {
+                self.composer.number_pages(true);
+                self.composer.restart_numbering(from);
+            }
+        }
+        {
+            let mut inner = Walk {
+                shaper: &mut *self.shaper,
+                assets: self.assets,
+                diagnostics: &mut *self.diagnostics,
+                composer: &mut *self.composer,
+                // A break asked for just before the section applies to its
+                // first page: an odd one is still an odd one.
+                pending_break: self.pending_break.take(),
+                band: BandSpec {
+                    bands: &bands,
+                    names: self.band.names,
+                    width: content,
+                },
+                pages: self.pages,
+            };
+            for child in &section.children {
+                inner.node(child, content);
+            }
+            inner.drain();
+        }
+        self.composer.turn_page(outer);
+        self.composer.number_pages(numbered);
+    }
+
+    /// A named place: no room of its own, and kept with what follows so it
+    /// lands on the page that does. See [`ir::Anchor`].
+    fn anchor(&mut self, anchor: &ir::Anchor) {
+        let mut atom = Atom::new(Pt(0.0));
+        atom.keep_with_next = true;
+        let index = self.emit(atom, anchor_content(anchor));
+        self.named(index, &anchor.id);
+    }
+
+    /// Records that `id` names the place atom `index` lands on.
+    fn named(&mut self, index: usize, id: &str) {
+        if !self.composer.anchor(index, id) {
+            self.diagnostics.report(
+                imprenta_core::diagnostic::Diagnostic::warning(
+                    "duplicate-anchor",
+                    format!("the anchor {id:?} is given twice; links go to the first"),
+                )
+                .with_hint("give every anchor a name of its own"),
+            );
+        }
+    }
+
+    /// The anchors and the links a container's children hold, which are
+    /// painted inside one atom and so are not walked one by one.
+    fn names_within(&mut self, index: usize, children: &[ir::Node]) {
+        for child in children {
+            match child {
+                ir::Node::Anchor(anchor) => self.named(index, &anchor.id),
+                ir::Node::Link(link) => {
+                    if let Some(id) = link.href.strip_prefix('#') {
+                        self.composer.wants(id);
+                    }
+                    self.names_within(index, std::slice::from_ref(&link.child));
+                }
+                ir::Node::Box(c) | ir::Node::Row(c) => self.names_within(index, &c.children),
+                _ => {}
+            }
         }
     }
 
@@ -1029,6 +1515,7 @@ impl Walk<'_> {
             shaper: self.shaper,
             assets: self.assets,
             diagnostics: self.diagnostics,
+            pages: self.pages,
         }
     }
 
@@ -1082,7 +1569,7 @@ impl Walk<'_> {
                 );
             }
         }
-        self.spacer(style.space_after);
+        self.space_after(style.space_after, style.keep_with_next);
     }
 
     fn container(
@@ -1107,8 +1594,9 @@ impl Walk<'_> {
 
         let mut atom = Atom::new(boxed.height());
         atom.keep_with_next = style.keep_with_next;
-        self.emit(atom, Content::Box(boxed));
-        self.spacer(style.space_after);
+        let index = self.emit(atom, Content::Box(boxed));
+        self.names_within(index, children);
+        self.space_after(style.space_after, style.keep_with_next);
     }
 
     /// Builds a node as a single piece of content rather than emitting it.
@@ -1117,6 +1605,7 @@ impl Walk<'_> {
             shaper: self.shaper,
             assets: self.assets,
             diagnostics: self.diagnostics,
+            pages: self.pages,
         }
         .inline(node, width)
     }
@@ -1132,8 +1621,12 @@ impl Walk<'_> {
     fn link(&mut self, href: &str, child: &ir::Node, width: Pt) {
         let content = self.inline(child, width);
         let height = content.height();
-        let link = LinkContent::url(href.to_string(), content).with_width(width);
-        self.emit(Atom::new(height), Content::Link(Box::new(link)));
+        let link = link_content(href, content).with_width(width);
+        let index = self.emit(Atom::new(height), Content::Link(Box::new(link)));
+        self.names_within(index, std::slice::from_ref(child));
+        if let Some(id) = href.strip_prefix('#') {
+            self.composer.wants(id);
+        }
     }
 
     fn canvas(&mut self, canvas: &ir::Canvas, _width: Pt) {
@@ -1143,11 +1636,10 @@ impl Walk<'_> {
     }
 
     fn list(&mut self, list: &ir::List, width: Pt) {
-        let gutter = list.gutter.unwrap_or(Pt(list.style.size.get() * 2.0));
-        let gap = Pt(list.style.size.get() * 0.4);
-        let built = List::new(marker_of(&list.marker), gutter, gap, width);
+        let built = list_of(list, width);
         for (i, item) in list.items.iter().enumerate() {
-            let row = built.item(self.shaper, i, item, list.style.size, list.style.color);
+            let item = refer(item, self.pages, self.diagnostics);
+            let row = built.item(self.shaper, i, &item, list.style.size, list.style.color);
             self.emit(Atom::new(row.height()), Content::Box(row));
         }
         self.spacer(list.style.space_after);
@@ -1219,7 +1711,12 @@ impl Walk<'_> {
         for batch in rows.chunks(MEASURE_BATCH) {
             let cells: Vec<(Vec<Cell>, Decoration)> = batch
                 .iter()
-                .map(|row| (cells_of(row, Pt(9.0)), decoration_of(&row.style)))
+                .map(|row| {
+                    (
+                        cells_of(row, Pt(9.0), self.shaper, self.pages, self.diagnostics),
+                        decoration_of(&row.style),
+                    )
+                })
                 .collect();
 
             let built = open.layout.rows_reporting(
@@ -1256,7 +1753,7 @@ impl Walk<'_> {
     ) -> BoxContent {
         layout.row_reporting(
             self.shaper,
-            &cells_of(row, default_size),
+            &cells_of(row, default_size, self.shaper, self.pages, self.diagnostics),
             decoration_of(&row.style),
             padding,
             self.diagnostics,
@@ -1377,12 +1874,20 @@ fn column_of(spec: &ir::ColumnSpec) -> Column {
 /// Built without a shaper on purpose: this is the half of a row that costs
 /// nothing, and keeping it separate is what lets the expensive half be handed
 /// to another thread.
-fn cells_of(row: &ir::Row, default_size: Pt) -> Vec<Cell> {
+fn cells_of(
+    row: &ir::Row,
+    default_size: Pt,
+    shaper: &Shaper,
+    pages: PageOf<'_>,
+    diagnostics: &mut Diagnostics,
+) -> Vec<Cell> {
     row.cells
         .iter()
         .map(|c| {
-            let mut cell = Cell::new(&c.text, c.size.unwrap_or(default_size))
-                .in_face(face_of(c.weight, c.italic))
+            let face = face_named(c.weight, c.italic, c.family.as_deref(), shaper, diagnostics);
+            let text = refer(&c.text, pages, diagnostics);
+            let mut cell = Cell::new(text, c.size.unwrap_or(default_size))
+                .in_face(face)
                 .spanning(c.col_span.unwrap_or(1));
             if let Some(color) = c.color {
                 cell = cell.inked(color);
@@ -1402,6 +1907,41 @@ fn declared_width(node: &ir::Node) -> Option<f32> {
     }
 }
 
+/// The face a run or a cell asks for, in the family it names.
+///
+/// A family nobody handed over is said out loud and set in the default one.
+/// The shaper would fall back by itself, and that is exactly why it has to be
+/// said here: a logo set in the wrong typeface looks deliberate. Asked only of
+/// text that names a family, so a ledger that names none pays nothing.
+fn face_named(
+    weight: ir::Weight,
+    italic: bool,
+    family: Option<&str>,
+    shaper: &Shaper,
+    diagnostics: &mut Diagnostics,
+) -> Face {
+    let face = face_of(weight, italic);
+    let Some(name) = family else {
+        return face;
+    };
+    let family = Family::named(name);
+    if family != Family::DEFAULT && !shaper.knows_family(family) {
+        diagnostics.report(
+            imprenta_core::diagnostic::Diagnostic::warning(
+                "unknown-family",
+                format!(
+                    "text asks for the family {name:?}, and no font of that family was handed over"
+                ),
+            )
+            .with_hint(
+                "hand its fonts over under that name, or set the text in the default family",
+            ),
+        );
+        return face;
+    }
+    Face { family, ..face }
+}
+
 fn face_of(weight: ir::Weight, italic: bool) -> Face {
     Face {
         weight: match weight {
@@ -1409,6 +1949,7 @@ fn face_of(weight: ir::Weight, italic: bool) -> Face {
             ir::Weight::Bold => Weight::Bold,
         },
         italic,
+        family: Family::DEFAULT,
     }
 }
 
@@ -1473,6 +2014,28 @@ fn marker_of(marker: &ir::Marker) -> Marker {
     }
 }
 
+/// A list's geometry, shared by the flow and a box so the two cannot drift.
+fn list_of(list: &ir::List, width: Pt) -> List {
+    let gutter = list.gutter.unwrap_or(Pt(list.style.size.get() * 2.0));
+    let gap = Pt(list.style.size.get() * 0.4);
+    List::new(marker_of(&list.marker), gutter, gap, width)
+}
+
+/// A link to an address, or — written `#name` — to the place an anchor named.
+fn link_content(href: &str, content: Content) -> LinkContent {
+    match href.strip_prefix('#') {
+        Some(id) => LinkContent::anchor(id, content),
+        None => LinkContent::url(href, content),
+    }
+}
+
+fn anchor_content(anchor: &ir::Anchor) -> Content {
+    Content::Anchor(Box::new(AnchorContent {
+        id: anchor.id.clone(),
+        bookmark: anchor.bookmark.clone().map(|title| (title, anchor.level)),
+    }))
+}
+
 fn canvas_content(canvas: &ir::Canvas) -> CanvasContent {
     let mut built = CanvasContent::new(canvas.width, canvas.height);
     for op in &canvas.ops {
@@ -1489,6 +2052,8 @@ fn canvas_content(canvas: &ir::Canvas) -> CanvasContent {
             } => built.op(PathOp::CurveTo(x1, y1, x2, y2, x, y)),
             ir::Op::Rect { x, y, w, h } => built.rect(x, y, w, h),
             ir::Op::Close => built.close(),
+            ir::Op::Fill { color } => built.op(PathOp::Fill(color)),
+            ir::Op::Stroke { color, width } => built.op(PathOp::Stroke(color, width)),
         };
     }
     if let Some(fill) = canvas.fill {
@@ -1512,6 +2077,8 @@ fn kind_of(node: &ir::Node) -> &'static str {
         ir::Node::Canvas(_) => "a canvas",
         ir::Node::Spacer(ir::Spacer { .. }) => "a spacer",
         ir::Node::PageBreak(ir::PageBreak { .. }) => "a page break",
+        ir::Node::Anchor(_) => "an anchor",
+        ir::Node::Section(_) => "a section",
     }
 }
 
@@ -2365,6 +2932,7 @@ mod tests {
             composer: &mut composer,
             pending_break: None,
             band: BandSpec::none(Pt(515.0)),
+            pages: PageOf::Off,
         };
         for node in &long.children {
             walk.node(node, Pt(515.0));
@@ -2420,6 +2988,7 @@ mod tests {
             composer: &mut composer,
             pending_break: None,
             band: BandSpec::none(Pt(515.0)),
+            pages: PageOf::Off,
         };
 
         let height = |walk: &mut Walk, space: f32| {
@@ -2470,6 +3039,7 @@ mod tests {
             composer: &mut composer,
             pending_break: None,
             band: BandSpec::none(Pt(515.0)),
+            pages: PageOf::Off,
         };
 
         let panel = |space: f32| {
@@ -3023,6 +3593,792 @@ mod tests {
             "the second header row did not come back on every page"
         );
     }
+
+    /// A page a hundred points tall with no margins, so the heights in a test
+    /// add up to a page break exactly where the arithmetic says they should.
+    fn short_page(children: Vec<ir::Node>) -> ir::Document {
+        ir::Document {
+            page: ir::PageSetup {
+                width: Pt(300.0),
+                height: Pt(100.0),
+                margin: Edges::all(Pt(0.0)),
+            },
+            ..document(children)
+        }
+    }
+
+    fn gap(height: f32) -> ir::Node {
+        ir::Node::Spacer(ir::Spacer {
+            height: Pt(height),
+            grow: false,
+        })
+    }
+
+    /// Where every page begins and ends, in atoms, with nothing painted.
+    fn pages_of(document: &ir::Document) -> Vec<crate::compose::PagePlan> {
+        let assets = assets();
+        let mut shaper = Shaper::with_faces(assets.fonts.iter().cloned());
+        let fonts = Fonts::from_shaper(&shaper).unwrap();
+        let width = document.page.width - document.page.margin.horizontal();
+        let geometry = Geometry {
+            width: document.page.width,
+            height: document.page.height,
+            margin: document.page.margin,
+            bands: Default::default(),
+        };
+        let mut composer = Composer::new(geometry, fonts).unwrap();
+        let mut diagnostics = Diagnostics::default();
+        let mut walk = Walk {
+            shaper: &mut shaper,
+            assets: &assets,
+            diagnostics: &mut diagnostics,
+            composer: &mut composer,
+            pending_break: None,
+            band: BandSpec::none(width),
+            pages: PageOf::Off,
+        };
+        for node in &document.children {
+            walk.node(node, width);
+        }
+        composer.plan()
+    }
+
+    #[test]
+    fn space_after_a_heading_does_not_cut_it_loose_from_the_table_it_introduces() {
+        // The space is an atom of its own, and it used to be emitted without
+        // the heading's `keep_with_next` — so the chain ended at the gap, the
+        // heading and its gap fitted at the foot of the page, and the table
+        // went overleaf without it. Any heading with room under it did this.
+        let heading = ir::Node::Text(ir::Text {
+            runs: vec![ir::Run::new("Consumo por modelo")],
+            style: ir::TextStyle {
+                keep_with_next: true,
+                space_after: Pt(8.0),
+                ..Default::default()
+            },
+        });
+        let table = ir::Node::Table(ir::Table {
+            columns: vec![ir::ColumnSpec::default()],
+            header: vec![ir::Row {
+                cells: vec![ir::Cell::new("Modelo")],
+                ..Default::default()
+            }],
+            rows: vec![ir::Row {
+                cells: vec![ir::Cell::new("uno")],
+                ..Default::default()
+            }],
+            repeat_header: true,
+            padding: Edges::all(Pt(2.0)),
+            space_after: Pt(0.0),
+        });
+
+        // 70 of filler, then 12 of heading and 8 of gap fit in the hundred;
+        // the header and its first row do not fit in the ten left over.
+        let pages = pages_of(&short_page(vec![gap(70.0), heading, table]));
+
+        assert_eq!(pages.len(), 2, "{pages:?}");
+        assert_eq!(
+            pages[1].first_atom, 1,
+            "the heading stayed behind: {pages:?}"
+        );
+    }
+
+    #[test]
+    fn a_growing_spacer_pushes_everything_after_it_to_the_foot() {
+        // A signature block is rarely one line. The gap used to keep with the
+        // next atom only, take every point the two of them left over, and so
+        // push the second line onto a page of its own.
+        let doc = short_page(vec![
+            paragraph("Total 1.234,56"),
+            ir::Node::Spacer(ir::Spacer {
+                height: Pt(0.0),
+                grow: true,
+            }),
+            paragraph("Firma"),
+            paragraph("Fecha"),
+        ]);
+
+        let built = build(&doc, &assets(), Options::default()).expect("build");
+
+        assert_eq!(built.pages, 1);
+    }
+
+    #[test]
+    fn a_growing_spacer_with_more_after_it_than_fits_takes_nothing() {
+        // What follows cannot be pinned to the foot of a page it does not fit
+        // on, so the gap stays at its floor and the content simply flows —
+        // rather than taking the page and leaving one line stranded at its
+        // foot with the rest overleaf.
+        let mut children = vec![
+            paragraph("arriba"),
+            ir::Node::Spacer(ir::Spacer {
+                height: Pt(0.0),
+                grow: true,
+            }),
+        ];
+        children.extend((0..10).map(|i| paragraph(&format!("linea {i}"))));
+
+        let pages = pages_of(&short_page(children));
+
+        // Twelve points a line: the first page holds "arriba", the gap and
+        // seven of the ten lines.
+        assert_eq!(pages[0].last_atom, 8, "{pages:?}");
+    }
+
+    #[test]
+    fn a_box_taller_than_a_whole_page_says_so() {
+        // It cannot be split, so it is painted past the foot of the page. The
+        // packer is right to place it rather than look for a page tall enough,
+        // but the author has to hear that it happened.
+        let tall = ir::Node::Box(ir::Container {
+            style: ir::BoxStyle::default(),
+            children: vec![gap(150.0)],
+        });
+
+        let built = build(&short_page(vec![tall]), &assets(), Options::default()).expect("build");
+
+        assert!(
+            built
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("page-overflow")),
+            "{:?}",
+            built.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_box_that_fits_on_a_page_says_nothing() {
+        let fits = ir::Node::Box(ir::Container {
+            style: ir::BoxStyle::default(),
+            children: vec![gap(100.0)],
+        });
+
+        let built = build(&short_page(vec![fits]), &assets(), Options::default()).expect("build");
+
+        assert!(built.diagnostics.is_empty(), "{:?}", built.diagnostics);
+    }
+
+    #[test]
+    fn a_canvas_paints_each_part_of_its_path_in_its_own_colour() {
+        // A chart is bars in two series, an axis and a grid, overlapping in
+        // one frame. With one paint per canvas each series needed a canvas of
+        // its own, and two canvases can only sit side by side.
+        let json = r##"{ "children": [{ "t": "canvas", "width": 100, "height": 40, "ops": [
+            { "op": "rect", "x": 0, "y": 0, "w": 10, "h": 20 },
+            { "op": "fill", "color": "#ff0000" },
+            { "op": "rect", "x": 20, "y": 0, "w": 10, "h": 30 },
+            { "op": "fill", "color": "#0000ff" },
+            { "op": "moveTo", "x": 0, "y": 40 },
+            { "op": "lineTo", "x": 100, "y": 40 },
+            { "op": "stroke", "color": "#00ff00", "width": 0.5 }
+        ]}]}"##;
+        let document: ir::Document = serde_json::from_str(json).expect("parse");
+
+        let built = build(&document, &assets(), Options { compress: false }).expect("build");
+        let text = String::from_utf8_lossy(&built.pdf);
+
+        assert!(text.contains("1 0 0 rg"), "the first series was not red");
+        assert!(text.contains("0 0 1 rg"), "the second series was not blue");
+        assert!(text.contains("0 1 0 RG"), "the axis was not stroked green");
+        assert_eq!(text.matches("\nf\n").count(), 2, "one fill per series");
+    }
+
+    const MONO: &[u8] = include_bytes!("../tests/fonts/RobotoMono-Regular.ttf");
+
+    fn with_mono() -> Assets {
+        assets().with_font(Face::family("mono"), MONO.to_vec())
+    }
+
+    /// The subset names a file embeds. The six letters are derived from the
+    /// subset itself, so two files share one only when they embedded the same
+    /// glyphs of the same font.
+    fn subsets(pdf: &[u8]) -> Vec<String> {
+        let text = String::from_utf8_lossy(pdf);
+        let mut names: Vec<String> = text
+            .split("/BaseFont /")
+            .skip(1)
+            .filter_map(|rest| rest.split_whitespace().next())
+            .map(str::to_string)
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Whether `text` was drawn in Roboto Mono: the same glyphs of it as a
+    /// document whose only font is Roboto Mono.
+    fn set_in_mono(pdf: &[u8], text: &str) -> bool {
+        let mono_only = Assets::new().with_font(Face::REGULAR, MONO.to_vec());
+        let reference = build(
+            &document(vec![paragraph(text)]),
+            &mono_only,
+            Options { compress: false },
+        )
+        .expect("build");
+        let wanted = subsets(&reference.pdf);
+        subsets(pdf).iter().any(|name| wanted.contains(name))
+    }
+
+    #[test]
+    fn a_run_in_a_named_family_is_drawn_in_that_familys_font() {
+        let doc = document(vec![ir::Node::Text(ir::Text {
+            runs: vec![
+                ir::Run::new("llm").in_family("mono"),
+                ir::Run::new("track").bold(),
+            ],
+            style: ir::TextStyle::default(),
+        })]);
+        let plain = Options { compress: false };
+
+        let built = build(&doc, &with_mono(), plain).expect("build");
+        let without = build(&document(vec![paragraph("llm")]), &with_mono(), plain).expect("build");
+
+        assert!(built.diagnostics.is_empty(), "{:?}", built.diagnostics);
+        assert!(set_in_mono(&built.pdf, "llm"));
+        assert!(!set_in_mono(&without.pdf, "llm"));
+    }
+
+    #[test]
+    fn a_cell_in_a_named_family_is_drawn_in_that_familys_font() {
+        let table = ir::Node::Table(ir::Table {
+            columns: vec![ir::ColumnSpec::default()],
+            header: vec![],
+            rows: vec![ir::Row {
+                cells: vec![ir::Cell {
+                    family: Some("mono".into()),
+                    ..ir::Cell::new("ES12 3456")
+                }],
+                ..Default::default()
+            }],
+            repeat_header: false,
+            padding: Edges::all(Pt(2.0)),
+            space_after: Pt(0.0),
+        });
+
+        let built = build(
+            &document(vec![table]),
+            &with_mono(),
+            Options { compress: false },
+        )
+        .expect("build");
+
+        assert!(built.diagnostics.is_empty(), "{:?}", built.diagnostics);
+        assert!(set_in_mono(&built.pdf, "ES12 3456"));
+    }
+
+    #[test]
+    fn a_family_nobody_handed_over_is_reported_and_set_in_the_default_one() {
+        // Never another family's font with the wrong glyph ids, and never in
+        // silence: the author named a typeface and is not getting it.
+        let doc = document(vec![ir::Node::Text(ir::Text {
+            runs: vec![ir::Run::new("llm").in_family("serif")],
+            style: ir::TextStyle::default(),
+        })]);
+
+        let built = build(&doc, &with_mono(), Options { compress: false }).expect("build");
+
+        assert!(
+            built
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("unknown-family") && d.contains("serif")),
+            "{:?}",
+            built.diagnostics
+        );
+        assert!(!set_in_mono(&built.pdf, "llm"));
+    }
+
+    #[test]
+    fn an_odd_break_counts_pages_from_the_start_of_the_document_not_of_what_is_held() {
+        // Pages are painted and dropped every few hundred atoms, and the
+        // packer only ever sees the ones still held. Asked whether the next
+        // page is odd, it used to count from the first page it could see, so
+        // a chapter meant for the recto landed on the verso once an odd
+        // number of pages had been let go — on any document long enough.
+        let pages_with = |lines: usize| {
+            let mut children: Vec<ir::Node> = (0..lines)
+                .map(|i| paragraph(&format!("linea {i}")))
+                .collect();
+            children.push(ir::Node::PageBreak(ir::PageBreak {
+                to: ir::BreakTo::Odd,
+            }));
+            children.push(paragraph("Capitulo"));
+            build(&short_page(children), &assets(), Options::default())
+                .expect("build")
+                .pages
+        };
+
+        // Eight lines a page. 296 lines fill 37 pages, so the chapter needs a
+        // blank 38 to open on 39; 288 fill 36, and 37 is already odd.
+        assert_eq!(pages_with(296), 39);
+        assert_eq!(pages_with(288), 37);
+    }
+
+    fn footer(text: &str) -> Option<ir::Band> {
+        Some(ir::Band {
+            height: None,
+            children: vec![paragraph(text)],
+        })
+    }
+
+    fn section(numbering: ir::Numbering, children: Vec<ir::Node>) -> ir::Section {
+        ir::Section {
+            page: None,
+            header: None,
+            footer: None,
+            numbering,
+            children,
+        }
+    }
+
+    /// What each page says, read back out of the file.
+    fn said(document: &ir::Document) -> Vec<Vec<String>> {
+        let built = build(document, &assets(), Options { compress: false }).expect("build");
+        assert!(built.diagnostics.is_empty(), "{:?}", built.diagnostics);
+        crate::reading::page_texts(&built.pdf)
+    }
+
+    #[test]
+    fn a_cover_is_a_section_with_no_bands_and_no_number() {
+        // The body's first page is page one, and "of" counts the pages that
+        // carry a number: the cover is neither.
+        let doc = ir::Document {
+            footer: footer("Pagina {{page}} de {{pages}}"),
+            ..document(vec![
+                ir::Node::Section(ir::Section {
+                    footer: Some(None),
+                    ..section(ir::Numbering::None, vec![paragraph("Portada")])
+                }),
+                paragraph("Cuerpo"),
+                page_break(),
+                paragraph("Anexo"),
+            ])
+        };
+
+        assert_eq!(
+            said(&doc),
+            vec![
+                vec!["Portada".to_string()],
+                vec!["Pagina 1 de 2".to_string(), "Cuerpo".to_string()],
+                vec!["Pagina 2 de 2".to_string(), "Anexo".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_section_that_says_nothing_of_its_bands_keeps_the_documents() {
+        let doc = ir::Document {
+            footer: footer("Pagina {{page}}"),
+            ..document(vec![
+                paragraph("Uno"),
+                ir::Node::Section(section(ir::Numbering::Continue, vec![paragraph("Dos")])),
+            ])
+        };
+
+        assert_eq!(
+            said(&doc),
+            vec![
+                vec!["Pagina 1".to_string(), "Uno".to_string()],
+                vec!["Pagina 2".to_string(), "Dos".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn numbering_can_start_again_and_carries_on_after_the_section() {
+        let doc = ir::Document {
+            footer: footer("{{page}}"),
+            ..document(vec![
+                paragraph("Indice"),
+                paragraph("Indice, segunda"),
+                page_break(),
+                paragraph("Indice, tercera"),
+                ir::Node::Section(section(
+                    ir::Numbering::Restart(1),
+                    vec![paragraph("Capitulo")],
+                )),
+                paragraph("Cierre"),
+            ])
+        };
+
+        let numbers: Vec<String> = said(&doc).into_iter().map(|page| page[0].clone()).collect();
+
+        assert_eq!(numbers, vec!["1", "2", "1", "2"]);
+    }
+
+    #[test]
+    fn a_section_lays_out_on_its_own_page_size() {
+        // Half the document's height: six lines that fill one page of the
+        // document's take two of the section's.
+        let lines = |n: usize| (0..n).map(|i| paragraph(&format!("l{i}"))).collect();
+        let doc = short_page(vec![
+            ir::Node::Section(ir::Section {
+                page: Some(ir::SectionPage {
+                    height: Some(Pt(50.0)),
+                    ..Default::default()
+                }),
+                ..section(ir::Numbering::Continue, lines(6))
+            }),
+            ir::Node::Box(ir::Container {
+                style: ir::BoxStyle::default(),
+                children: lines(6),
+            }),
+        ]);
+
+        let built = build(&doc, &assets(), Options::default()).expect("build");
+
+        assert_eq!(built.pages, 3);
+    }
+
+    #[test]
+    fn a_section_opens_a_page_but_never_leaves_one_blank() {
+        let doc = document(vec![
+            ir::Node::Section(section(ir::Numbering::Continue, vec![paragraph("Uno")])),
+            ir::Node::Section(section(ir::Numbering::Continue, vec![paragraph("Dos")])),
+        ]);
+
+        assert_eq!(
+            said(&doc),
+            vec![vec!["Uno".to_string()], vec!["Dos".to_string()]]
+        );
+    }
+
+    #[test]
+    fn a_section_whose_page_has_no_room_is_reported_and_kept_on_the_page_around_it() {
+        let doc = document(vec![ir::Node::Section(ir::Section {
+            page: Some(ir::SectionPage {
+                height: Some(Pt(20.0)),
+                ..Default::default()
+            }),
+            ..section(ir::Numbering::Continue, vec![paragraph("Uno")])
+        })]);
+
+        let built = build(&doc, &assets(), Options { compress: false }).expect("build");
+
+        assert!(
+            built.diagnostics.iter().any(|d| d.contains("invalid-page")),
+            "{:?}",
+            built.diagnostics
+        );
+        assert_eq!(
+            crate::reading::page_texts(&built.pdf),
+            vec![vec!["Uno".to_string()]]
+        );
+    }
+
+    /// A table of contents: a row per chapter, the page on the right.
+    fn contents(chapters: &[&str]) -> ir::Node {
+        ir::Node::Table(ir::Table {
+            columns: vec![
+                ir::ColumnSpec::default(),
+                ir::ColumnSpec {
+                    width: Length::Pt(Pt(40.0)),
+                    align: ir::Align::End,
+                    ..Default::default()
+                },
+            ],
+            header: vec![],
+            rows: chapters
+                .iter()
+                .map(|id| ir::Row {
+                    cells: vec![
+                        ir::Cell::new(*id),
+                        ir::Cell::new(format!("{{{{pageof:{id}}}}}")),
+                    ],
+                    ..Default::default()
+                })
+                .collect(),
+            repeat_header: false,
+            padding: Edges::all(Pt(2.0)),
+            space_after: Pt(0.0),
+        })
+    }
+
+    fn chapter(id: &str, lines: usize) -> Vec<ir::Node> {
+        let mut nodes = vec![page_break(), anchor(id, Some(id)), paragraph(id)];
+        nodes.extend((0..lines).map(|i| paragraph(&format!("{id} {i}"))));
+        nodes
+    }
+
+    #[test]
+    fn a_table_of_contents_prints_the_page_each_chapter_landed_on() {
+        // The contents come first and point forward, at pages nobody has
+        // laid out yet. A chapter that runs over two pages pushes the next
+        // one on, and the contents have to know.
+        let mut children = vec![contents(&["uno", "dos", "tres"])];
+        children.extend(chapter("uno", 1));
+        children.extend(chapter("dos", 12));
+        children.extend(chapter("tres", 1));
+
+        let pages = said(&short_page(children));
+
+        assert_eq!(
+            pages[0],
+            vec!["uno", "2", "dos", "3", "tres", "5"],
+            "the contents: {pages:?}"
+        );
+    }
+
+    #[test]
+    fn a_page_reference_is_the_number_a_reader_sees_not_where_the_page_sits() {
+        // Behind an unnumbered cover, the body's first page is page one and
+        // the chapter after it page two — the third sheet of the file.
+        let doc = document(vec![
+            ir::Node::Section(section(ir::Numbering::None, vec![paragraph("Portada")])),
+            paragraph("Ver pagina {{pageof:cuerpo}}"),
+            page_break(),
+            anchor("cuerpo", None),
+            paragraph("Cuerpo"),
+        ]);
+
+        let pages = said(&doc);
+
+        assert_eq!(pages[1], vec!["Ver pagina 2"], "{pages:?}");
+    }
+
+    #[test]
+    fn a_page_reference_works_in_a_band_too() {
+        let doc = ir::Document {
+            footer: footer("Anexo en la {{pageof:anexo}}"),
+            ..document(vec![
+                paragraph("Uno"),
+                page_break(),
+                anchor("anexo", None),
+                paragraph("Anexo"),
+            ])
+        };
+
+        let pages = said(&doc);
+
+        assert_eq!(pages[0][0], "Anexo en la 2", "{pages:?}");
+    }
+
+    #[test]
+    fn a_page_reference_to_a_place_nobody_named_is_reported_and_prints_nothing() {
+        let built = build(
+            &document(vec![paragraph("Ver pagina {{pageof:nada}}.")]),
+            &assets(),
+            Options { compress: false },
+        )
+        .expect("build");
+
+        assert!(
+            built
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("unknown-anchor") && d.contains("nada")),
+            "{:?}",
+            built.diagnostics
+        );
+        assert_eq!(
+            crate::reading::page_texts(&built.pdf),
+            vec![vec!["Ver pagina .".to_string()]]
+        );
+    }
+
+    #[test]
+    fn a_reference_that_moves_what_it_refers_to_is_settled_before_it_is_printed() {
+        // The count walks with a guess of three digits and the paint with the
+        // real number. Here the guess is too wide for the line and the real
+        // number is not, so the paragraph counted as two lines is painted as
+        // one — and the chapter after it, counted onto page two, lands on page
+        // one. What is printed must be where the chapter really went.
+        let mut shaper = Shaper::with_faces(assets().fonts.iter().cloned());
+        let wide = |text: &str, shaper: &mut Shaper| {
+            shaper.break_lines(text, Pt(10.0), Pt(1000.0))[0]
+                .width
+                .get()
+        };
+        let guessed = wide("En 999 fin", &mut shaper);
+        let real = wide("En 1 fin", &mut shaper);
+        let width = Pt((guessed + real) / 2.0);
+
+        // Eight lines a page: the reference, six more, and the chapter is the
+        // eighth line only if the reference took one.
+        let mut children = vec![paragraph("En {{pageof:fin}} fin")];
+        children.extend((0..6).map(|i| paragraph(&format!("l{i}"))));
+        children.push(anchor("fin", None));
+        children.push(paragraph("Fin"));
+        let doc = ir::Document {
+            page: ir::PageSetup {
+                width,
+                height: Pt(100.0),
+                margin: Edges::all(Pt(0.0)),
+            },
+            ..document(children)
+        };
+
+        let pages = said(&doc);
+
+        assert_eq!(pages.len(), 1, "{pages:?}");
+        assert_eq!(pages[0][0], "En 1 fin", "{pages:?}");
+    }
+
+    fn anchor(id: &str, bookmark: Option<&str>) -> ir::Node {
+        ir::Node::Anchor(ir::Anchor {
+            id: id.into(),
+            bookmark: bookmark.map(str::to_string),
+            level: 1,
+        })
+    }
+
+    fn link_to(href: &str, text: &str) -> ir::Node {
+        ir::Node::Link(ir::Link {
+            href: href.into(),
+            child: Box::new(paragraph(text)),
+        })
+    }
+
+    fn page_break() -> ir::Node {
+        ir::Node::PageBreak(ir::PageBreak::default())
+    }
+
+    /// The page objects in reading order.
+    fn kids(pdf: &[u8]) -> Vec<String> {
+        let text = String::from_utf8_lossy(pdf);
+        let start = text.find("/Kids [").expect("no page tree") + 7;
+        let end = start + text[start..].find(']').unwrap();
+        text[start..end]
+            .split(" R")
+            .map(|r| r.trim().trim_end_matches(" 0").to_string())
+            .filter(|r| !r.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn an_anchor_is_a_place_on_the_page_its_content_lands_on() {
+        let doc = document(vec![
+            link_to("#resumen", "Resumen"),
+            page_break(),
+            anchor("resumen", Some("Resumen ejecutivo")),
+            paragraph("Resumen ejecutivo"),
+        ]);
+
+        let built = build(&doc, &assets(), Options { compress: false }).expect("build");
+        let pages = kids(&built.pdf);
+
+        assert!(built.diagnostics.is_empty(), "{:?}", built.diagnostics);
+        let destination = format!("/resumen [{} 0 R /XYZ", pages[1]);
+        assert_eq!(count(&built.pdf, destination.as_bytes()), 1);
+        assert_eq!(
+            count(&built.pdf, b"/S /GoTo"),
+            1,
+            "the link does not jump inside"
+        );
+        assert_eq!(count(&built.pdf, b"/Title (Resumen ejecutivo)"), 1);
+    }
+
+    #[test]
+    fn an_anchor_takes_no_room_and_keeps_with_what_it_names() {
+        // Placed at the foot of a full page it would name that page while
+        // its heading went overleaf, and the link would land a page short.
+        let heading = ir::Node::Text(ir::Text {
+            runs: vec![ir::Run::new("Modelos")],
+            style: ir::TextStyle::default(),
+        });
+
+        // 90 of filler leave ten points: room for an anchor, not for a line.
+        let pages = pages_of(&short_page(vec![
+            gap(90.0),
+            anchor("modelos", None),
+            heading,
+        ]));
+
+        assert_eq!(pages.len(), 2, "{pages:?}");
+        assert_eq!(
+            pages[1].first_atom, 1,
+            "the anchor stayed behind: {pages:?}"
+        );
+    }
+
+    #[test]
+    fn an_anchor_inside_a_box_is_a_place_too() {
+        let boxed = ir::Node::Box(ir::Container {
+            style: ir::BoxStyle::default(),
+            children: vec![anchor("nota", None), paragraph("Nota")],
+        });
+
+        let built = build(
+            &document(vec![link_to("#nota", "ver nota"), boxed]),
+            &assets(),
+            Options { compress: false },
+        )
+        .expect("build");
+
+        assert!(built.diagnostics.is_empty(), "{:?}", built.diagnostics);
+        assert_eq!(count(&built.pdf, b"/nota ["), 1);
+    }
+
+    #[test]
+    fn a_link_to_a_place_nobody_named_is_reported() {
+        let built = build(
+            &document(vec![link_to("#resumen", "Resumen")]),
+            &assets(),
+            Options::default(),
+        )
+        .expect("build");
+
+        assert!(
+            built
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("unknown-anchor") && d.contains("resumen")),
+            "{:?}",
+            built.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_place_named_twice_is_reported() {
+        let built = build(
+            &document(vec![anchor("a", None), paragraph("uno"), anchor("a", None)]),
+            &assets(),
+            Options::default(),
+        )
+        .expect("build");
+
+        assert!(
+            built
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("duplicate-anchor")),
+            "{:?}",
+            built.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_list_can_sit_inside_a_box() {
+        // A boxed note with bullets in it. A list is rows of a marker and its
+        // text, which is exactly what a box can already stack.
+        let list = |items: Vec<String>| ir::List {
+            marker: ir::Marker::Decimal,
+            items,
+            style: ir::TextStyle::default(),
+            gutter: None,
+        };
+        let boxed = ir::Node::Box(ir::Container {
+            style: ir::BoxStyle::default(),
+            children: vec![ir::Node::List(list(vec!["uno".into(), "dos".into()]))],
+        });
+        let plain = Options { compress: false };
+
+        let built = build(&document(vec![boxed]), &assets(), plain).expect("build");
+        let flowing = build(
+            &document(vec![ir::Node::List(list(vec!["uno".into(), "dos".into()]))]),
+            &assets(),
+            plain,
+        )
+        .expect("build");
+
+        assert!(built.diagnostics.is_empty(), "{:?}", built.diagnostics);
+        let runs = |pdf: &[u8]| {
+            let text = String::from_utf8_lossy(pdf);
+            text.matches("Tj").count() + text.matches("TJ").count()
+        };
+        assert_eq!(runs(&built.pdf), runs(&flowing.pdf));
+    }
 }
 
 #[cfg(test)]
@@ -3305,6 +4661,7 @@ mod page_bands {
                     names: &document.accumulators,
                     width,
                 },
+                pages: PageOf::Off,
             };
             for node in &document.children {
                 ctx.node(node, width);
@@ -3315,9 +4672,12 @@ mod page_bands {
             &mut shaper,
             &assets,
             &mut diagnostics,
-            &declared,
-            &document.accumulators,
-            width,
+            BandSpec {
+                bands: &declared,
+                names: &document.accumulators,
+                width,
+            },
+            PageOf::Off,
         )
         .unwrap()
         .pdf

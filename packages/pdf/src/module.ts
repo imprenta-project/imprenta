@@ -17,6 +17,8 @@ export interface Exports {
     weightPtr: number,
     weightLen: number,
     italic: number,
+    familyPtr: number,
+    familyLen: number,
     dataPtr: number,
     dataLen: number,
   ): number;

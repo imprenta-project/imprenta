@@ -17,7 +17,7 @@ import { compile } from './module.js';
 
 export interface BootData {
   wasm: ArrayBuffer;
-  fonts: { weight?: 'regular' | 'bold'; italic?: boolean; data: ArrayBuffer }[];
+  fonts: { weight?: 'regular' | 'bold'; italic?: boolean; family?: string; data: ArrayBuffer }[];
   images: { name: string; data: ArrayBuffer }[];
   /**
    * Throwaway documents rendered before reporting ready.

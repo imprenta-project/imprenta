@@ -30,8 +30,15 @@
 //!
 //! What it does do is the whole of what a page of this engine can contain:
 //! glyph runs in embedded subset fonts with a working `ToUnicode` map, filled
-//! and stroked paths with per-colour opacity, PNG and JPEG images, and link
-//! annotations.
+//! and stroked paths with per-colour opacity, PNG and JPEG images, link
+//! annotations — to an address, or to a named place in the document — and the
+//! outline a reader shows beside the pages.
+//!
+//! A link inside the document names its destination rather than pointing at
+//! a page, because the table of contents is written before the chapters it
+//! points at and a page is in the file the moment it closes. The names are
+//! resolved in one dictionary at the end, when every page has been written,
+//! which is what lets the writer keep holding nothing.
 //!
 //! # Order of objects in the file
 //!
@@ -49,7 +56,7 @@ use blocks::Blocks;
 use imprenta_core::color::Color;
 pub use pdf::Pdf;
 use pdf_writer::{Chunk, Content, Finish, Name, Rect, Ref, Str};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 pub use font::{FaceId, Glyph};
@@ -98,6 +105,22 @@ pub struct Region {
     pub height: f32,
 }
 
+/// Where a link goes.
+#[derive(Debug, Clone, PartialEq)]
+enum Target {
+    Uri(String),
+    /// A destination named with [`PageWriter::destination`], on this page or
+    /// any other, before or after.
+    Named(String),
+}
+
+/// One entry of the outline, in the order it was given.
+struct Bookmark {
+    title: String,
+    level: u8,
+    destination: String,
+}
+
 /// A document being written.
 pub struct Writer {
     /// The file so far, in pieces that are never moved. See [`blocks`].
@@ -124,6 +147,11 @@ pub struct Writer {
     /// been freed can be handed out again, and the second image would be
     /// drawn as the first.
     seen_images: HashMap<*const u8, ImageId>,
+    /// Each named place: the page it is on, and how far up that page its top
+    /// sits in the page's own coordinates. Sorted, so the file comes out the
+    /// same however the pages were painted.
+    destinations: BTreeMap<String, (Ref, f32)>,
+    bookmarks: Vec<Bookmark>,
     settings: Settings,
 }
 
@@ -144,6 +172,8 @@ impl Writer {
             faces: Vec::new(),
             images: Vec::new(),
             seen_images: HashMap::new(),
+            destinations: BTreeMap::new(),
+            bookmarks: Vec::new(),
             settings,
         }
     }
@@ -215,6 +245,7 @@ impl Writer {
             images: Vec::new(),
             alphas: Vec::new(),
             links: Vec::new(),
+            destinations: Vec::new(),
             fill: None,
             stroke: None,
             alpha: 255,
@@ -223,6 +254,20 @@ impl Writer {
 
     pub fn pages(&self) -> usize {
         self.page_refs.len()
+    }
+
+    /// Adds an entry to the outline, pointing at a named destination.
+    ///
+    /// Entries nest by `level`: a level-2 entry belongs to the level-1 entry
+    /// before it, and an entry that skips a level is simply nested one deeper
+    /// than the one before. The order is the order of the calls, which for an
+    /// engine painting in document order is the order of the document.
+    pub fn bookmark(&mut self, title: &str, level: u8, destination: &str) {
+        self.bookmarks.push(Bookmark {
+            title: title.to_string(),
+            level: level.max(1),
+            destination: destination.to_string(),
+        });
     }
 
     /// Writes the fonts, the images, the page tree and the catalogue, then
@@ -275,14 +320,116 @@ impl Writer {
             chunk.pages(tree).count(count).kids(kids.iter().copied());
         });
 
+        let destinations = self.write_destinations();
+        let outline = self.write_outline();
+
         let catalog = self.alloc();
         self.object(catalog, |chunk| {
             let mut dict: pdf_writer::writers::Catalog<'_> = chunk.indirect(catalog).start();
             dict.pages(tree);
+            if let Some(destinations) = destinations {
+                dict.destinations(destinations);
+            }
+            if let Some(outline) = outline {
+                dict.outlines(outline);
+                // Opened with the outline showing: a document that has one is
+                // a document somebody is meant to find their way around.
+                dict.page_mode(pdf_writer::types::PageMode::UseOutlines);
+            }
             dict.finish();
         });
 
         Ok(self.trailer(catalog))
+    }
+
+    /// The dictionary of named destinations, if anything was named.
+    fn write_destinations(&mut self) -> Option<Ref> {
+        if self.destinations.is_empty() {
+            return None;
+        }
+        let id = self.alloc();
+        let destinations = std::mem::take(&mut self.destinations);
+        self.object(id, |chunk| {
+            let mut dict = chunk.destinations(id);
+            for (name, (page, top)) in &destinations {
+                dict.insert(Name(name.as_bytes()))
+                    .page(*page)
+                    .xyz(0.0, *top, None);
+            }
+        });
+        Some(id)
+    }
+
+    /// The outline, if anything was bookmarked: one object for its root and
+    /// one per entry, linked into a tree by level.
+    fn write_outline(&mut self) -> Option<Ref> {
+        if self.bookmarks.is_empty() {
+            return None;
+        }
+        let bookmarks = std::mem::take(&mut self.bookmarks);
+        let root = self.alloc();
+        let ids: Vec<Ref> = bookmarks.iter().map(|_| self.alloc()).collect();
+
+        // Each entry's parent, found by walking back to the nearest entry of
+        // a lower level. `None` is the root.
+        let mut parents: Vec<Option<usize>> = Vec::with_capacity(bookmarks.len());
+        let mut open: Vec<usize> = Vec::new();
+        for (i, entry) in bookmarks.iter().enumerate() {
+            while open
+                .last()
+                .is_some_and(|&j| bookmarks[j].level >= entry.level)
+            {
+                open.pop();
+            }
+            parents.push(open.last().copied());
+            open.push(i);
+        }
+        let children = |parent: Option<usize>| -> Vec<usize> {
+            (0..bookmarks.len())
+                .filter(|&i| parents[i] == parent)
+                .collect()
+        };
+        // Every entry below `i`, which is what an open entry's count is: the
+        // run after it that sits deeper than it does.
+        let descendants = |i: usize| -> i32 {
+            bookmarks[i + 1..]
+                .iter()
+                .take_while(|b| b.level > bookmarks[i].level)
+                .count() as i32
+        };
+
+        let top = children(None);
+        self.object(root, |chunk| {
+            let mut outline = chunk.outline(root);
+            if let (Some(&first), Some(&last)) = (top.first(), top.last()) {
+                outline.first(ids[first]).last(ids[last]);
+            }
+            outline.count(bookmarks.len() as i32);
+        });
+
+        for (i, entry) in bookmarks.iter().enumerate() {
+            let siblings = children(parents[i]);
+            let at = siblings.iter().position(|&s| s == i).unwrap_or(0);
+            let below = children(Some(i));
+            let parent = parents[i].map_or(root, |p| ids[p]);
+            let count = descendants(i);
+            self.object(ids[i], |chunk| {
+                let mut item = chunk.outline_item(ids[i]);
+                item.title(pdf_writer::TextStr(&entry.title));
+                item.parent(parent);
+                if at > 0 {
+                    item.prev(ids[siblings[at - 1]]);
+                }
+                if let Some(&next) = siblings.get(at + 1) {
+                    item.next(ids[next]);
+                }
+                if let (Some(&first), Some(&last)) = (below.first(), below.last()) {
+                    item.first(ids[first]).last(ids[last]).count(count);
+                }
+                item.dest_name(Name(entry.destination.as_bytes()));
+            });
+        }
+        Some(root)
     }
 
     /// Writes several objects that have to be built together, recording where
@@ -367,7 +514,10 @@ pub struct PageWriter<'a> {
     /// The distinct opacities this page asked for. Anything short of opaque
     /// needs a graphics state object, and one per value per page is enough.
     alphas: Vec<u8>,
-    links: Vec<(Region, String)>,
+    links: Vec<(Region, Target)>,
+    /// Places on this page that links and the outline can name, with the
+    /// distance of each from the top of the page.
+    destinations: Vec<(String, f32)>,
     /// The paint state as the stream stands, so a colour is set once rather
     /// than before every glyph run of a table.
     fill: Option<Color>,
@@ -508,7 +658,25 @@ impl PageWriter<'_> {
     /// An annotation rather than part of the content stream, which is why it
     /// is collected here and written with the page.
     pub fn link(&mut self, region: Region, url: &str) {
-        self.links.push((region, url.to_string()));
+        self.links.push((region, Target::Uri(url.to_string())));
+    }
+
+    /// Marks a region of the page as a link to a named destination, which
+    /// may be on a page not yet painted.
+    pub fn link_to(&mut self, region: Region, destination: &str) {
+        self.links
+            .push((region, Target::Named(destination.to_string())));
+    }
+
+    /// Names the place `y` points down this page, for a link or the outline
+    /// to jump to. A name given twice keeps the first place it was given.
+    pub fn destination(&mut self, name: &str, y: f32) {
+        self.destinations.push((name.to_string(), y));
+    }
+
+    /// As [`Writer::bookmark`], for a painter that holds only the page.
+    pub fn bookmark(&mut self, title: &str, level: u8, destination: &str) {
+        self.writer.bookmark(title, level, destination);
     }
 
     /// Writes the page and everything on it, then drops it.
@@ -522,6 +690,7 @@ impl PageWriter<'_> {
             images,
             alphas,
             links,
+            destinations,
             ..
         } = self;
         content.restore_state();
@@ -602,7 +771,7 @@ impl PageWriter<'_> {
             page.finish();
         });
 
-        for (id, (region, url)) in link_ids.into_iter().zip(links) {
+        for (id, (region, target)) in link_ids.into_iter().zip(links) {
             writer.object(id, |chunk| {
                 let mut annotation = chunk.annotation(id);
                 annotation.subtype(pdf_writer::types::AnnotationType::Link);
@@ -615,12 +784,31 @@ impl PageWriter<'_> {
                     height - region.y,
                 ));
                 annotation.border(0.0, 0.0, 0.0, None);
-                annotation
-                    .action()
-                    .action_type(pdf_writer::types::ActionType::Uri)
-                    .uri(Str(url.as_bytes()));
+                let mut action = annotation.action();
+                match &target {
+                    Target::Uri(url) => {
+                        action
+                            .action_type(pdf_writer::types::ActionType::Uri)
+                            .uri(Str(url.as_bytes()));
+                    }
+                    Target::Named(name) => {
+                        action
+                            .action_type(pdf_writer::types::ActionType::GoTo)
+                            .destination_named(Name(name.as_bytes()));
+                    }
+                }
+                action.finish();
                 annotation.finish();
             });
+        }
+
+        // Turned the right way up here, where the page's height is known:
+        // a destination's top is measured from the bottom of the page.
+        for (name, y) in destinations {
+            writer
+                .destinations
+                .entry(name)
+                .or_insert((page_id, height - y));
         }
 
         writer.page_refs.push(page_id);

@@ -61,9 +61,62 @@ export interface DocumentProps extends Styled {
   children?: ReactNode;
 }
 
+/**
+ * Pages of their own: a cover with no bands and wider margins, front matter
+ * numbered apart from the body.
+ *
+ * Starts on a new page, and the document's own settings resume on a new page
+ * after it. Everything it leaves out is the document's.
+ */
+export interface SectionProps extends Styled {
+  /** A named paper size, as on `<Document>`. */
+  size?: PageSize;
+  landscape?: boolean;
+  width?: number;
+  height?: number;
+  /** One number for all four sides, or only the sides that differ. */
+  margin?: number | Edges;
+  /**
+   * `false` for none. Left out, the document's; a `<Header>` written inside
+   * the section is its own.
+   */
+  header?: false;
+  /** As `header`. */
+  footer?: false;
+  /**
+   * `"continue"` from the page before, the default; `"none"` for pages that
+   * carry no number and are not counted by `<PageCount>`; or `{ restart: 1 }`.
+   */
+  numbering?: 'continue' | 'none' | { restart: number };
+  children?: ReactNode;
+}
+
+/**
+ * A named place: what a `<Link href="#id">` jumps to and what `<PageOf id>`
+ * prints the page of. Written just before what it names; it takes no room
+ * and moves with what follows.
+ */
+export interface AnchorProps {
+  id: string;
+  /** Its title in the outline a reader shows beside the pages. */
+  bookmark?: string;
+  /** How deep in the outline; 1, the default, is the top. */
+  level?: number;
+}
+
+export interface PageOfProps {
+  /** The `<Anchor>` whose page this prints. */
+  id: string;
+}
+
 export interface TextProps extends Styled {
   size?: number;
   color?: string;
+  /**
+   * The family its runs are set in, by the name its fonts were handed over
+   * under. Absent is the default family; a `<Span>` inside can name another.
+   */
+  family?: string;
   /**
    * Which edge of its box the lines are set against.
    *
@@ -161,6 +214,8 @@ export interface CellProps {
   color?: string;
   weight?: 'regular' | 'bold';
   italic?: boolean;
+  /** As `<Text family>`. */
+  family?: string;
 }
 
 export interface RowProps {
@@ -211,6 +266,8 @@ export interface InlineProps extends Styled {
 
 export interface SpanProps extends InlineProps {
   color?: string;
+  /** As `<Text family>`. `""` returns to the default family. */
+  family?: string;
 }
 
 /**
@@ -238,6 +295,19 @@ export const PageCount = host<Record<string, never>>('pageCount');
 
 /** A running total, as it stood when this page opened or closed. */
 export const RunningTotal = host<RunningTotalProps>('runningTotal');
+
+/**
+ * The number of the page an `<Anchor>` landed on, inside a `<Text>`.
+ *
+ * A table of contents comes before what it lists, so the document is laid out
+ * once to find the pages and again to print them — paid only by a document
+ * that uses one.
+ */
+export const PageOf = host<PageOfProps>('pageOf');
+
+export const Section = host<SectionProps>('section');
+
+export const Anchor = host<AnchorProps>('anchor');
 
 /** The document itself: page setup, and everything on the pages. */
 export const Document = host<DocumentProps>('document');

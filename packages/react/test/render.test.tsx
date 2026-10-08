@@ -11,6 +11,7 @@ import {
   Row,
   render,
   Spacer,
+  Span,
   Table,
   Text,
   toDocument,
@@ -450,6 +451,18 @@ describe('paragraphs', () => {
     );
 
     expect(runs).toEqual([{ text: '7.400,00 €', weight: 'bold' }]);
+  });
+
+  it('sets a stretch in the family it names, and the paragraph in its own', async () => {
+    // A family is a run property in the IR, like weight: the paragraph's is
+    // where its runs start, and a span that names another wins inside it.
+    const runs = await runsOf(
+      <Text family="mono">
+        llm<Span family="">track</Span>
+      </Text>,
+    );
+
+    expect(runs).toEqual([{ text: 'llm', family: 'mono' }, { text: 'track' }]);
   });
 
   it('says where loose text should have gone', async () => {

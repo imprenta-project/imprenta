@@ -114,6 +114,12 @@ pub struct Flow<'a> {
     /// as the table's first page, and the repeated header goes missing on
     /// exactly the pages that most need it.
     pub started: &'a [bool],
+    /// How many pages of the document come before this flow's first.
+    ///
+    /// Only parity needs it: whether a page is a recto is a fact about the
+    /// whole document, and a flow that resumes after released pages would
+    /// otherwise count its first page as page one.
+    pub pages_before: usize,
 }
 
 impl<'a> Flow<'a> {
@@ -125,7 +131,14 @@ impl<'a> Flow<'a> {
             contributions: &[],
             opening: &[],
             started: &[],
+            pages_before: 0,
         }
+    }
+
+    /// Counts this flow's pages on from `pages` that came before it.
+    pub fn after_pages(mut self, pages: usize) -> Self {
+        self.pages_before = pages;
+        self
     }
 
     /// Starts the running totals from where a previous segment left off.
@@ -228,10 +241,10 @@ pub fn pack(flow: &Flow, budget: Pt) -> Vec<Page> {
         }
 
         // Parity breaks may need a blank page to land on the right side of
-        // the spread. `pages.len() + 1` is the 1-indexed number the next page
-        // will have. A blank page contributes nothing, so the running totals
-        // pass straight through it.
-        while parity_unsatisfied(forced, pages.len() + 1) {
+        // the spread. The next page's place in the whole document is what
+        // decides it, counted from its first page. A blank page contributes
+        // nothing, so the running totals pass straight through it.
+        while parity_unsatisfied(forced, flow.pages_before + pages.len() + 1) {
             seal(&mut pages, Page::default(), &opening, &running);
         }
 
@@ -266,14 +279,30 @@ pub fn pack(flow: &Flow, budget: Pt) -> Vec<Page> {
         // is placed anyway rather than searched for a page that fits (see the
         // emptiness guard above). Without the clamp its growers would take a
         // negative share and what follows would be painted above the top edge.
+        //
+        // What is left is measured against everything after the run as well,
+        // up to the next forced break: a signature block is rarely one atom,
+        // and a gap that left room for only the first would push the rest
+        // overleaf. The look-ahead stops as soon as it has run past the page,
+        // because by then the answer is zero, so it costs at most a page of
+        // atoms and only for a run that grows.
         let growers = run.clone().filter(|&i| atoms[i].grow).count();
         let share = if growers == 0 {
             0.0
         } else {
-            let declared = atoms[run.clone()]
+            let room = budget.get() - y.get();
+            let mut declared = atoms[run.clone()]
                 .iter()
                 .fold(Pt(0.0), |total, a| total + a.height);
-            (budget.get() - y.get() - declared.get()).max(0.0) / growers as f32
+            let mut next = run.end;
+            while declared.get() <= room
+                && let Some(atom) = atoms.get(next)
+                && atom.break_before == Break::Auto
+            {
+                declared = declared + atom.height;
+                next += 1;
+            }
+            (room - declared.get()).max(0.0) / growers as f32
         };
 
         for i in run.clone() {

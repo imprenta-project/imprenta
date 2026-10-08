@@ -8,7 +8,7 @@
 use imprenta_pdf::build::{Assets, build};
 use imprenta_pdf::ir::Document;
 use imprenta_pdf::render::Options;
-use imprenta_pdf::shape::{Face, Weight};
+use imprenta_pdf::shape::{Face, Family, Weight};
 
 /// A typeface the document may ask for, and the file behind it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +16,8 @@ pub struct FontInput {
     /// `"regular"` or `"bold"`. Empty means regular.
     pub weight: String,
     pub italic: bool,
+    /// The name runs ask for it by. Empty is the default family.
+    pub family: String,
     pub data: Vec<u8>,
 }
 
@@ -124,6 +126,7 @@ pub fn face(font: &FontInput) -> Result<Face, JobError> {
     Ok(Face {
         weight,
         italic: font.italic,
+        family: Family::named(&font.family),
     })
 }
 
@@ -145,6 +148,7 @@ mod tests {
             fonts: vec![FontInput {
                 weight: "regular".into(),
                 italic: false,
+                family: String::new(),
                 data: ROBOTO.to_vec(),
             }],
             images: vec![],
@@ -206,6 +210,7 @@ mod tests {
             fonts: vec![FontInput {
                 weight: "semibold".into(),
                 italic: false,
+                family: String::new(),
                 data: ROBOTO.to_vec(),
             }],
             images: vec![],
@@ -246,6 +251,7 @@ mod tests {
             let font = FontInput {
                 weight: given.into(),
                 italic: false,
+                family: String::new(),
                 data: vec![],
             };
             assert_eq!(face(&font).unwrap().weight, expected, "for {given:?}");
@@ -259,11 +265,13 @@ mod tests {
                 FontInput {
                     weight: "regular".into(),
                     italic: false,
+                    family: String::new(),
                     data: ROBOTO.to_vec(),
                 },
                 FontInput {
                     weight: "bold".into(),
                     italic: false,
+                    family: String::new(),
                     data: ROBOTO_BOLD.to_vec(),
                 },
             ],
@@ -277,6 +285,31 @@ mod tests {
 
         assert_eq!(assets.fonts.len(), 2);
         assert!(assets.images.contains_key("logo"));
+    }
+
+    #[test]
+    fn a_font_handed_over_under_a_family_name_is_the_family_a_run_asks_for() {
+        const MONO: &[u8] = include_bytes!("../../imprenta-pdf/tests/fonts/RobotoMono-Regular.ttf");
+        const LOGO_TEXT: &[u8] = br#"{
+            "children": [{ "t": "text", "runs": [
+                { "text": "llm", "family": "mono" },
+                { "text": "track", "family": "serif" }
+            ]}]
+        }"#;
+        let mut library = roman();
+        library.fonts.push(FontInput {
+            weight: "regular".into(),
+            italic: false,
+            family: "mono".into(),
+            data: MONO.to_vec(),
+        });
+
+        let outcome = run(LOGO_TEXT, &library).unwrap();
+
+        // "mono" was handed over and "serif" was not: one complaint, naming
+        // the one that is missing.
+        assert_eq!(outcome.diagnostics.len(), 1, "{:?}", outcome.diagnostics);
+        assert!(outcome.diagnostics[0].contains("serif"));
     }
 
     #[test]

@@ -8,6 +8,11 @@ export interface GoogleFace {
   family: string;
   weight: 'regular' | 'bold';
   italic: boolean;
+  /**
+   * The name a document asks for this family by. Absent is the default
+   * family — the one every run is set in unless it names another.
+   */
+  name?: string;
 }
 
 export interface GoogleOptions {
@@ -15,6 +20,12 @@ export interface GoogleOptions {
   weights?: ('regular' | 'bold')[];
   /** Fetch the italic of every weight as well. */
   italics?: boolean;
+  /**
+   * The name a document asks for this family by, for a second typeface
+   * beside the default one. Google's own name is not used for it: it is
+   * what a run would have to repeat, and a brand's own file has none.
+   */
+  name?: string;
 }
 
 /**
@@ -27,13 +38,14 @@ export interface GoogleOptions {
  */
 export function google(family: string, options: GoogleOptions = {}): GoogleFace[] {
   const weights = options.weights ?? ['regular'];
+  const named = options.name === undefined ? {} : { name: options.name };
   return weights.flatMap((weight) =>
     options.italics
       ? [
-          { family, weight, italic: false },
-          { family, weight, italic: true },
+          { family, weight, italic: false, ...named },
+          { family, weight, italic: true, ...named },
         ]
-      : [{ family, weight, italic: false }],
+      : [{ family, weight, italic: false, ...named }],
   );
 }
 

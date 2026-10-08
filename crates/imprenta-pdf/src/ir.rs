@@ -112,6 +112,8 @@ pub enum Node {
     Canvas(Canvas),
     Spacer(Spacer),
     PageBreak(PageBreak),
+    Anchor(Anchor),
+    Section(Section),
 }
 
 /// A paragraph. One or more stretches, each with its own style.
@@ -172,6 +174,99 @@ pub struct Spacer {
 pub struct PageBreak {
     #[serde(default)]
     pub to: BreakTo,
+}
+
+/// A named place in the document: what a `link` to `#id` jumps to, what
+/// `{{pageof:id}}` gives the page number of, and — with a `bookmark` — an
+/// entry in the outline a reader shows beside the pages.
+///
+/// A node of its own, placed before what it names, rather than a field on
+/// every other node. It takes no room and keeps with what follows, so it
+/// lands on the page that content lands on, and nothing that paginates has to
+/// learn that it exists.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Anchor {
+    pub id: String,
+    /// The title of its outline entry. Absent is no entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bookmark: Option<String>,
+    /// How deep in the outline the entry sits; 1 is the top.
+    #[serde(default = "top_level")]
+    pub level: u8,
+}
+
+fn top_level() -> u8 {
+    1
+}
+
+/// Content set on pages of its own: a cover with no bands and wider margins,
+/// a front matter numbered apart from the body.
+///
+/// A section always begins on a new page, and the document's own settings
+/// resume on a new page after it. What it leaves out it inherits.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Section {
+    /// Only what differs from the document's page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<SectionPage>,
+    /// Absent inherits the document's band; `null` has none.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub header: Option<Option<Band>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub footer: Option<Option<Band>>,
+    #[serde(default)]
+    pub numbering: Numbering,
+    #[serde(default)]
+    pub children: Vec<Node>,
+}
+
+/// A field that was written, `null` or not — which is the difference between
+/// taking a band away and saying nothing about it.
+fn present<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+/// A section's page, field by field over the document's.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionPage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<Pt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<Pt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin: Option<Edges<Pt>>,
+}
+
+/// How a section's pages are counted.
+///
+/// `{{page}}` prints the number and `{{pages}}` counts the pages that have
+/// one, so a cover that is not numbered is not counted either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Numbering {
+    /// On from the page before. What every page of a document without
+    /// sections does.
+    #[default]
+    Continue,
+    /// No number, and not counted.
+    None,
+    /// Numbered from this page on, starting again at the number given.
+    Restart(usize),
 }
 
 impl<'de> serde::Deserialize<'de> for Node {
@@ -239,6 +334,8 @@ fn node<'de, D: serde::Deserializer<'de>>(tag: &str, body: D) -> Result<Node, D:
         "canvas" => Node::Canvas(Canvas::deserialize(body)?),
         "spacer" => Node::Spacer(Spacer::deserialize(body)?),
         "pageBreak" => Node::PageBreak(PageBreak::deserialize(body)?),
+        "anchor" => Node::Anchor(Anchor::deserialize(body)?),
+        "section" => Node::Section(Section::deserialize(body)?),
         other => {
             return Err(D::Error::unknown_variant(
                 other,
@@ -253,6 +350,8 @@ fn node<'de, D: serde::Deserializer<'de>>(tag: &str, body: D) -> Result<Node, D:
                     "canvas",
                     "spacer",
                     "pageBreak",
+                    "anchor",
+                    "section",
                 ],
             ));
         }
@@ -280,6 +379,13 @@ pub struct Run {
     pub italic: bool,
     #[serde(default)]
     pub color: Option<Color>,
+    /// The family it is set in, by the name its fonts were handed over
+    /// under. Absent is the default family.
+    ///
+    /// Boxed rather than a `String`: eight bytes fewer on every run and every
+    /// cell of a ledger, which nearly always leaves it empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<Box<str>>,
 }
 
 impl Run {
@@ -289,7 +395,13 @@ impl Run {
             weight: Weight::Regular,
             italic: false,
             color: None,
+            family: None,
         }
+    }
+
+    pub fn in_family(mut self, family: impl Into<Box<str>>) -> Self {
+        self.family = Some(family.into());
+        self
     }
 
     pub fn bold(mut self) -> Self {
@@ -542,6 +654,9 @@ pub struct Cell {
     pub weight: Weight,
     #[serde(default)]
     pub italic: bool,
+    /// As [`Run::family`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<Box<str>>,
 }
 
 impl Cell {
@@ -553,6 +668,7 @@ impl Cell {
             color: None,
             weight: Weight::Regular,
             italic: false,
+            family: None,
         }
     }
 }
@@ -715,6 +831,17 @@ pub enum Op {
         h: Pt,
     },
     Close,
+    /// Paints the path drawn since the last paint and starts a new one, so
+    /// one canvas can hold a chart's series, grid and axes in their own
+    /// colours. Whatever is left after the last of these takes the canvas's
+    /// own `fill` and `stroke`.
+    Fill {
+        color: Color,
+    },
+    Stroke {
+        color: Color,
+        width: Pt,
+    },
 }
 
 #[cfg(test)]
@@ -812,10 +939,88 @@ mod tests {
                     h: Pt(5.0),
                 },
                 Op::Close,
+                Op::Fill {
+                    color: Color::BLACK,
+                },
+                Op::Stroke {
+                    color: Color::BLACK,
+                    width: Pt(0.5),
+                },
             ],
             fill: Some(Color::BLACK),
             stroke: None,
             space_after: Pt(0.0),
+        }));
+    }
+
+    #[test]
+    fn an_anchor_is_read_as_written_and_survives_a_round_trip() {
+        let anchor: Node =
+            serde_json::from_str(r#"{ "t": "anchor", "id": "resumen", "bookmark": "Resumen" }"#)
+                .unwrap();
+
+        assert_eq!(
+            anchor,
+            Node::Anchor(Anchor {
+                id: "resumen".into(),
+                bookmark: Some("Resumen".into()),
+                level: 1,
+            })
+        );
+        round_trip(&anchor);
+    }
+
+    #[test]
+    fn a_section_tells_inheriting_a_band_from_taking_it_away() {
+        // Absent is the document's band, `null` is none at all: a cover has
+        // no footer, and the chapter after it has the document's.
+        let section: Node = serde_json::from_str(
+            r#"{ "t": "section",
+                 "page": { "margin": { "top": 48, "right": 56, "bottom": 48, "left": 56 } },
+                 "footer": null,
+                 "numbering": "none",
+                 "children": [] }"#,
+        )
+        .unwrap();
+        let Node::Section(section) = &section else {
+            panic!("not a section: {section:?}");
+        };
+
+        assert_eq!(section.header, None, "an absent header is inherited");
+        assert_eq!(section.footer, Some(None), "a null footer is taken away");
+        assert_eq!(section.numbering, Numbering::None);
+        let page = section.page.unwrap();
+        assert_eq!(page.margin, Some(Edges::symmetric(Pt(48.0), Pt(56.0))));
+        assert_eq!(page.width, None, "an absent width is the document's");
+    }
+
+    #[test]
+    fn numbering_is_a_word_or_a_place_to_restart_from() {
+        let read = |json: &str| serde_json::from_str::<Numbering>(json).unwrap();
+
+        assert_eq!(read(r#""continue""#), Numbering::Continue);
+        assert_eq!(read(r#""none""#), Numbering::None);
+        assert_eq!(read(r#"{ "restart": 1 }"#), Numbering::Restart(1));
+    }
+
+    #[test]
+    fn a_section_survives_a_round_trip() {
+        round_trip(&Node::Section(Section {
+            page: Some(SectionPage {
+                width: None,
+                height: Some(Pt(400.0)),
+                margin: None,
+            }),
+            header: Some(None),
+            footer: Some(Some(Band {
+                height: None,
+                children: vec![],
+            })),
+            numbering: Numbering::Restart(3),
+            children: vec![Node::Spacer(Spacer {
+                height: Pt(1.0),
+                grow: false,
+            })],
         }));
     }
 

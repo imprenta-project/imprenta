@@ -20,3 +20,6 @@ pub mod session;
 pub mod shape;
 pub mod table;
 pub mod widows;
+
+#[cfg(test)]
+mod reading;

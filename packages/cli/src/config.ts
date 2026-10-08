@@ -26,6 +26,12 @@ export interface FontConfig {
   path: string;
   weight?: 'regular' | 'bold';
   italic?: boolean;
+  /**
+   * The name a document asks for this family by, for a typeface beside the
+   * default one. `name` and not `family`, because `family` is what marks a
+   * face to be fetched from Google.
+   */
+  name?: string;
 }
 
 /** Either a file the project has, or a face to fetch from Google. */
@@ -49,7 +55,8 @@ export interface Loaded {
   path: string | null;
   /** Absolute, resolved against the config rather than the shell. */
   documentsDir: string;
-  fonts: { path: string; weight: 'regular' | 'bold'; italic: boolean }[];
+  /** `family` is the name documents ask for it by, absent for the default family. */
+  fonts: { path: string; weight: 'regular' | 'bold'; italic: boolean; family?: string }[];
   images: { name: string; path: string }[];
 }
 
@@ -82,6 +89,7 @@ export async function loadConfig(from: string): Promise<Loaded> {
       path: isGoogle(font) ? await cacheGoogleFont(font, cache) : against(font.path),
       weight: font.weight ?? 'regular',
       italic: font.italic ?? false,
+      ...(font.name === undefined ? {} : { family: font.name }),
     })),
   );
 

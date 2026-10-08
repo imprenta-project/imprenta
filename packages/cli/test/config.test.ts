@@ -169,6 +169,18 @@ describe('loadConfig', () => {
     expect(fonts[1].path).toContain('roboto');
   }, 60_000);
 
+  it('carries the name a second family is asked for by', async () => {
+    const dir = project({
+      'imprenta.config.ts': `
+        export default { fonts: [{ path: './a.ttf' }, { path: './b.ttf', name: 'mono' }] };
+      `,
+    });
+
+    const { fonts } = await loadConfig(dir);
+
+    expect(fonts.map((f) => f.family)).toEqual([undefined, 'mono']);
+  });
+
   it('says which line of the config it could not read', async () => {
     // A config is code, and code has mistakes in it. "Cannot read properties
     // of undefined" with no file name is the worst way to learn that.

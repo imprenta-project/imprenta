@@ -40,11 +40,48 @@ const DEFAULT_LINE_HEIGHT: parley::LineHeight = parley::LineHeight::FontSizeRela
 /// correctness.
 const FAST_PATH_MAX_CHARS: usize = 64;
 
-/// Which face of a family a run is set in.
+/// Which face of which family a run is set in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Face {
     pub weight: Weight,
     pub italic: bool,
+    pub family: Family,
+}
+
+/// A typeface family, by the name a document calls it.
+///
+/// A hash of the name rather than the name, so a face stays `Copy` and eight
+/// bytes: it is carried by every stretch of every line and is half of every
+/// shaping cache key, and a string there would be an allocation per stretch.
+/// Sixty-four bits leave a collision between the handful of families one
+/// document registers out of the question.
+///
+/// The name is the author's, not the font file's. "mono" is whatever was
+/// handed over as mono; the engine never asks the font what it calls itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct Family(u64);
+
+impl Family {
+    /// The family a run is set in when it names none.
+    pub const DEFAULT: Self = Self(0);
+
+    /// The family called `name`; the empty name is the default one.
+    pub const fn named(name: &str) -> Self {
+        // FNV-1a: short, `const`, and nothing here needs it to resist anyone.
+        let bytes = name.as_bytes();
+        if bytes.is_empty() {
+            return Self::DEFAULT;
+        }
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut i = 0;
+        while i < bytes.len() {
+            hash ^= bytes[i] as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            i += 1;
+        }
+        // Zero is the default family's, and a name must never land on it.
+        Self(if hash == 0 { 1 } else { hash })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -58,15 +95,40 @@ impl Face {
     pub const REGULAR: Self = Self {
         weight: Weight::Regular,
         italic: false,
+        family: Family::DEFAULT,
     };
     pub const BOLD: Self = Self {
         weight: Weight::Bold,
         italic: false,
+        family: Family::DEFAULT,
     };
     pub const ITALIC: Self = Self {
         weight: Weight::Regular,
         italic: true,
+        family: Family::DEFAULT,
     };
+
+    /// The regular face of the family called `name`.
+    pub const fn family(name: &str) -> Self {
+        Self {
+            family: Family::named(name),
+            ..Self::REGULAR
+        }
+    }
+
+    pub const fn bold(self) -> Self {
+        Self {
+            weight: Weight::Bold,
+            ..self
+        }
+    }
+
+    pub const fn italic(self) -> Self {
+        Self {
+            italic: true,
+            ..self
+        }
+    }
 
     fn parley_weight(self) -> parley::FontWeight {
         match self.weight {
@@ -207,9 +269,21 @@ impl ShapedRun {
 pub struct Shaper {
     font_cx: parley::FontContext,
     layout_cx: parley::LayoutContext<Brush>,
-    /// The family every face registered under. Layouts name it explicitly;
-    /// see [`Shaper::new`].
+    /// The family a layout names when its face was never registered — the
+    /// regular face's. Layouts name a family explicitly; see
+    /// [`Shaper::with_faces`].
     family: String,
+    /// Every registered face, with the name its font file gives its family.
+    ///
+    /// A layout has to name the family of the face it is shaped in, because
+    /// the painter draws that face with that face's file. Naming one family
+    /// for all of them shaped a face from a second family in the first, and
+    /// the ids that came back were drawn against the wrong font.
+    ///
+    /// A list rather than a map: a document registers a handful of faces, and
+    /// every cell of a ledger asks which one it is set in, so a couple of
+    /// comparisons beat hashing.
+    registered: Vec<(Face, String)>,
     /// The registered faces, by the bytes they came from, so the painter can
     /// embed the same file that shaped the text.
     faces: HashMap<Face, Arc<[u8]>>,
@@ -237,11 +311,12 @@ impl Shaper {
         Self::with_faces([(Face::REGULAR, font)])
     }
 
-    /// Builds a shaper over several faces of one family.
+    /// Builds a shaper over several faces, of one family or of several.
     ///
-    /// Faces rather than families: a document sets a word bold, it does not
-    /// switch typeface mid-sentence. Real family fallback — a CJK face behind
-    /// a Latin one — is a separate concern and needs its own tests.
+    /// A face is asked for by the family the *document* calls it — see
+    /// [`Family`] — and never by what the font file calls itself. Real family
+    /// fallback, a CJK face behind a Latin one, is a separate concern and
+    /// needs its own tests.
     pub fn with_faces(faces: impl IntoIterator<Item = (Face, Vec<u8>)>) -> Self {
         // System fonts are switched off deliberately. Registering a font adds
         // it to the collection but does not select it, so with them enabled a
@@ -258,24 +333,34 @@ impl Shaper {
                 system_fonts: false,
                 ..Default::default()
             });
-        let mut family = None;
+        let mut first = None;
+        let mut registered: Vec<(Face, String)> = Vec::new();
         let mut face_bytes: HashMap<Face, Arc<[u8]>> = HashMap::new();
         for (face, bytes) in faces {
             let shared: Arc<[u8]> = Arc::from(bytes.as_slice());
-            let registered = collection.register_fonts(bytes.into(), None);
-            let id = registered
+            let ids = collection.register_fonts(bytes.into(), None);
+            let id = ids
                 .first()
                 .map(|(id, _)| *id)
                 .expect("the font contains no usable family");
-            family.get_or_insert_with(|| {
-                collection
-                    .family_name(id)
-                    .expect("a registered family always has a name")
-                    .to_string()
-            });
+            let name = collection
+                .family_name(id)
+                .expect("a registered family always has a name")
+                .to_string();
+            first.get_or_insert_with(|| name.clone());
+            // A face handed over twice keeps the later file, as the bytes do.
+            registered.retain(|(f, _)| *f != face);
+            registered.push((face, name));
             face_bytes.insert(face, shared);
         }
-        let family = family.expect("a shaper needs at least one face");
+        // The regular face's family when there is one, since its metrics are
+        // the ones every line box is sampled from.
+        let family = registered
+            .iter()
+            .find(|(f, _)| *f == Face::REGULAR)
+            .map(|(_, name)| name.clone())
+            .or(first)
+            .expect("a shaper needs at least one face");
 
         let mut shaper = Self {
             font_cx: parley::FontContext {
@@ -284,6 +369,7 @@ impl Shaper {
             },
             layout_cx: parley::LayoutContext::new(),
             family,
+            registered,
             faces: face_bytes,
             ascent_ratio: 0.0,
             leading_ratio: 0.0,
@@ -304,7 +390,7 @@ impl Shaper {
     /// depend on which path each line took.
     fn sample_metrics(&mut self) {
         const PROBE: f32 = 1000.0;
-        let stack = self.stack();
+        let stack = self.stack(Face::REGULAR);
         let mut builder = self
             .layout_cx
             .ranged_builder(&mut self.font_cx, "Hg", 1.0, true);
@@ -321,12 +407,62 @@ impl Shaper {
         }
     }
 
-    /// Names the vendored family, so no layout can fall through to a
-    /// system font. Owned because the builder borrows `self` mutably.
-    fn stack(&self) -> parley::FontStack<'static> {
+    /// Names the vendored family `face` was registered in, so no layout can
+    /// fall through to a system font or to another family's glyphs. Owned
+    /// because the builder borrows `self` mutably.
+    fn stack(&self, face: Face) -> parley::FontStack<'static> {
         parley::FontStack::Single(parley::FontFamily::Named(std::borrow::Cow::Owned(
-            self.family.clone(),
+            self.family_name(face).to_string(),
         )))
+    }
+
+    /// What the font file registered as `face` calls its family.
+    fn family_name(&self, face: Face) -> &str {
+        self.registered
+            .iter()
+            .find(|(f, _)| *f == face)
+            .map_or(&self.family, |(_, name)| name)
+    }
+
+    /// The registered face that stands in for `face`.
+    ///
+    /// Asked once, before anything is shaped, and the answer is the face the
+    /// stretch records. That is what keeps the glyphs and the font they are
+    /// drawn with in step: a face that was never handed over used to be
+    /// shaped against whatever the layout engine found in its place and drawn
+    /// with the regular file, which is the right letters only by luck.
+    ///
+    /// The nearest face wins: the family's own face without the weight it
+    /// lacks, then its regular, then the default family's version of what
+    /// was asked for, then its regular. A family nobody registered is the
+    /// author's to hear about — see [`Self::knows_family`].
+    pub fn resolve(&self, face: Face) -> Face {
+        let has = |f: Face| self.registered.iter().any(|(r, _)| *r == f);
+        if has(face) {
+            return face;
+        }
+        let upright = Face {
+            weight: crate::shape::Weight::Regular,
+            ..face
+        };
+        let regular = Face {
+            family: face.family,
+            ..Face::REGULAR
+        };
+        let default = Face {
+            family: Family::DEFAULT,
+            ..face
+        };
+        [upright, regular, default, Face::REGULAR]
+            .into_iter()
+            .find(|f| has(*f))
+            .or_else(|| self.registered.first().map(|(f, _)| *f))
+            .unwrap_or(face)
+    }
+
+    /// Whether any face of `family` was handed over.
+    pub fn knows_family(&self, family: Family) -> bool {
+        self.registered.iter().any(|(f, _)| f.family == family)
     }
 
     /// Shapes `text` in the regular face.
@@ -339,6 +475,7 @@ impl Shaper {
     /// The face is part of the key: the same word in bold is different
     /// glyphs, not the same glyphs drawn heavier.
     pub fn shape_in(&mut self, text: &str, face: Face) -> ShapedRun {
+        let face = self.resolve(face);
         let key = (face, text.to_string());
         if let Some(cached) = self.cache.get(&key) {
             self.hits += 1;
@@ -367,7 +504,7 @@ impl Shaper {
         const EM: f32 = 1000.0;
 
         self.layouts += 1;
-        let stack = self.stack();
+        let stack = self.stack(face);
         let mut builder = self
             .layout_cx
             .ranged_builder(&mut self.font_cx, text, 1.0, true);
@@ -386,13 +523,9 @@ impl Shaper {
                 let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                     continue;
                 };
-                // Each glyph is paired with the byte range of the cluster it
-                // was shaped from, which is what the ToUnicode map needs.
-                let mut clusters = glyph_run.run().visual_clusters().flat_map(|cluster| {
-                    let r = cluster.text_range();
-                    let range = r.start as u32..r.end as u32;
-                    cluster.glyphs().map(move |_| range.clone())
-                });
+                // Each glyph is paired with the byte range it stands for,
+                // which is what the ToUnicode map needs.
+                let mut clusters = glyph_ranges(glyph_run.run());
 
                 for g in glyph_run.positioned_glyphs() {
                     glyphs.push(Glyph {
@@ -447,9 +580,19 @@ impl Shaper {
             ranges.push(start..text.len());
         }
 
-        let styles: Vec<(Face, Color)> = runs.iter().map(|r| (r.face, r.color)).collect();
+        let styles: Vec<(Face, Color)> = runs
+            .iter()
+            .map(|r| (self.resolve(r.face), r.color))
+            .collect();
+        // Only a stretch in another family names its own: the default stack
+        // already covers the rest, and most text is one family. Worked out
+        // before the builder, which borrows the shaper.
+        let stacks: Vec<_> = styles
+            .iter()
+            .map(|(face, _)| (self.family_name(*face) != self.family).then(|| self.stack(*face)))
+            .collect();
         self.layouts += 1;
-        let stack = self.stack();
+        let stack = self.stack(Face::REGULAR);
         let mut builder = self
             .layout_cx
             .ranged_builder(&mut self.font_cx, &text, 1.0, true);
@@ -457,16 +600,19 @@ impl Shaper {
         builder.push_default(parley::StyleProperty::FontSize(size.get()));
         builder.push_default(parley::StyleProperty::LineHeight(DEFAULT_LINE_HEIGHT));
 
-        for (i, (run, range)) in runs.iter().zip(&ranges).enumerate() {
+        for (i, ((&(face, _), range), own)) in styles.iter().zip(&ranges).zip(stacks).enumerate() {
             builder.push(
-                parley::StyleProperty::FontWeight(run.face.parley_weight()),
+                parley::StyleProperty::FontWeight(face.parley_weight()),
                 range.clone(),
             );
             builder.push(
-                parley::StyleProperty::FontStyle(run.face.parley_style()),
+                parley::StyleProperty::FontStyle(face.parley_style()),
                 range.clone(),
             );
             builder.push(parley::StyleProperty::Brush(i as Brush), range.clone());
+            if let Some(own) = own {
+                builder.push(parley::StyleProperty::FontStack(own), range.clone());
+            }
         }
 
         let mut layout: parley::Layout<Brush> = builder.build(&text);
@@ -485,13 +631,14 @@ impl Shaper {
         if text.is_empty() {
             return Vec::new();
         }
+        let face = self.resolve(face);
 
         if let Some(line) = self.try_single_line(text, size, max_width, face) {
             return vec![line];
         }
 
         self.layouts += 1;
-        let stack = self.stack();
+        let stack = self.stack(face);
         let mut builder = self
             .layout_cx
             .ranged_builder(&mut self.font_cx, text, 1.0, true);
@@ -546,15 +693,7 @@ impl Shaper {
                         run_at = Some(run_range);
                         taken = 0;
                     }
-                    let mut clusters = glyph_run
-                        .run()
-                        .visual_clusters()
-                        .flat_map(|cluster| {
-                            let r = cluster.text_range();
-                            let range = r.start as u32..r.end as u32;
-                            cluster.glyphs().map(move |_| range.clone())
-                        })
-                        .skip(taken);
+                    let mut clusters = glyph_ranges(glyph_run.run()).skip(taken);
 
                     let mut glyphs = Vec::new();
                     let mut advance = 0.0f32;
@@ -651,6 +790,64 @@ impl Shaper {
     pub fn misses(&self) -> u64 {
         self.misses
     }
+}
+
+/// The byte range of the source each glyph of `run` stands for, in the order
+/// the glyphs are drawn.
+///
+/// A ligature is one glyph for several letters, and parley hands it over as a
+/// cluster holding the glyph beside clusters holding none: "fi" is an "f"
+/// with the ligature in it and an "i" with nothing. Taken cluster by cluster
+/// the glyph stood for the "f" alone — drawn right, copied out as "fn" — so a
+/// continuation is folded into the cluster beside it in the text that has
+/// the glyph. Beside, and not before: in a right-to-left run the glyph comes
+/// after the letters it swallowed. Only a continuation: a line break has no
+/// glyph either, and it stands for nothing on the page.
+///
+/// Lazy, and allocates nothing: it is asked once per glyph run, and a line
+/// that is several glyph runs over one long run of a paragraph asks it again
+/// for each, skipping what the earlier ones took. Building the whole run's
+/// ranges each time made that quadratic in the paragraph, and cost a ledger a
+/// quarter of its render.
+fn glyph_ranges<'a>(run: &'a parley::Run<'a, Brush>) -> impl Iterator<Item = Range<u32>> + 'a {
+    fn span(cluster: &parley::Cluster<'_, Brush>) -> Range<u32> {
+        let r = cluster.text_range();
+        r.start as u32..r.end as u32
+    }
+    fn join(a: Range<u32>, b: Range<u32>) -> Range<u32> {
+        a.start.min(b.start)..a.end.max(b.end)
+    }
+    let swallows = |cluster: &parley::Cluster<'_, Brush>| {
+        cluster.is_ligature_continuation() && cluster.glyphs().next().is_none()
+    };
+
+    let rtl = run.is_rtl();
+    let mut clusters = run.visual_clusters().peekable();
+    // Right to left, the letters a ligature swallowed come before its glyph.
+    let mut swallowed: Option<Range<u32>> = None;
+    std::iter::from_fn(move || {
+        loop {
+            let cluster = clusters.next()?;
+            let mut range = span(&cluster);
+            if swallows(&cluster) {
+                if rtl {
+                    swallowed = Some(swallowed.take().map_or(range.clone(), |s| join(s, range)));
+                }
+                continue;
+            }
+            if let Some(before) = swallowed.take() {
+                range = join(range, before);
+            }
+            // Left to right, they come after it.
+            while !rtl && clusters.peek().is_some_and(swallows) {
+                if let Some(next) = clusters.next() {
+                    range = join(range, span(&next));
+                }
+            }
+            return Some(std::iter::repeat_n(range, cluster.glyphs().count()));
+        }
+    })
+    .flatten()
 }
 
 /// One stretch of author text with its own style.
@@ -1434,6 +1631,142 @@ mod tests {
 
         assert_eq!(line.len(), 1);
         assert!(!line[0].is_empty());
+    }
+
+    #[test]
+    fn a_face_from_another_family_is_shaped_in_that_family() {
+        // The painter draws a face with the bytes registered for it. Every
+        // layout used to name the first family registered, so a face from
+        // another one came back with the first family's glyph ids, drawn
+        // against the second's file: the wrong letters, and nothing said so.
+        const MONO: &[u8] = include_bytes!("../tests/fonts/RobotoMono-Regular.ttf");
+        let mut mixed = Shaper::with_faces([
+            (Face::REGULAR, ROBOTO.to_vec()),
+            (Face::ITALIC, MONO.to_vec()),
+        ]);
+        let mut mono = Shaper::new(MONO.to_vec());
+
+        let ids = |run: ShapedRun| run.glyphs.iter().map(|g| g.id).collect::<Vec<_>>();
+
+        assert_eq!(
+            ids(mixed.shape_in("Wim", Face::ITALIC)),
+            ids(mono.shape("Wim"))
+        );
+        assert_eq!(
+            mixed.break_lines_in("Wim", Pt(9.0), Pt(400.0), Face::ITALIC)[0].width,
+            mono.break_lines("Wim", Pt(9.0), Pt(400.0))[0].width
+        );
+    }
+
+    const MONO: &[u8] = include_bytes!("../tests/fonts/RobotoMono-Regular.ttf");
+
+    fn ids_of(line: &Line) -> Vec<u32> {
+        line.segments
+            .iter()
+            .flat_map(|s| s.glyphs.iter().map(|g| g.id))
+            .collect()
+    }
+
+    fn with_mono() -> Shaper {
+        Shaper::with_faces([
+            (Face::REGULAR, ROBOTO.to_vec()),
+            (Face::BOLD, ROBOTO_BOLD.to_vec()),
+            (Face::family("mono"), MONO.to_vec()),
+        ])
+    }
+
+    #[test]
+    fn a_named_family_is_shaped_in_its_own_font() {
+        let mut s = with_mono();
+        let mono = Shaper::new(MONO.to_vec())
+            .break_lines("llm", Pt(9.0), Pt(400.0))
+            .remove(0);
+
+        let line = s
+            .break_lines_in("llm", Pt(9.0), Pt(400.0), Face::family("mono"))
+            .remove(0);
+
+        assert_eq!(ids_of(&line), ids_of(&mono));
+        assert_eq!(line.segments[0].face, Face::family("mono"));
+    }
+
+    #[test]
+    fn a_face_a_family_lacks_is_set_in_that_familys_regular() {
+        // Bold mono was asked for and only regular mono was handed over. The
+        // stretch says which face it was really shaped in, because that is
+        // the one the painter must draw it with: shaping in one face and
+        // drawing in another is the wrong letters.
+        let mut s = with_mono();
+
+        let line = s
+            .break_lines_in("llm", Pt(9.0), Pt(400.0), Face::family("mono").bold())
+            .remove(0);
+
+        assert_eq!(line.segments[0].face, Face::family("mono"));
+    }
+
+    #[test]
+    fn a_family_never_registered_falls_back_to_the_default_one() {
+        let mut s = with_mono();
+
+        let line = s
+            .break_lines_in("llm", Pt(9.0), Pt(400.0), Face::family("serif").bold())
+            .remove(0);
+
+        assert_eq!(line.segments[0].face, Face::BOLD);
+        assert!(s.knows_family(Face::family("mono").family));
+        assert!(!s.knows_family(Face::family("serif").family));
+    }
+
+    #[test]
+    fn the_cached_path_resolves_a_face_the_same_way_as_the_full_one() {
+        // A short string goes through the shaping cache instead of a layout.
+        // Both have to land on the same face, or the same word would be drawn
+        // in two fonts depending on how long its line was.
+        let mut s = with_mono();
+
+        let short = s
+            .break_lines_in("ab", Pt(9.0), Pt(400.0), Face::family("mono").bold())
+            .remove(0);
+        let long = s
+            .break_lines_in(
+                &"ab ".repeat(40),
+                Pt(9.0),
+                Pt(4000.0),
+                Face::family("mono").bold(),
+            )
+            .remove(0);
+
+        assert_eq!(short.segments[0].face, long.segments[0].face);
+    }
+
+    #[test]
+    fn a_stretch_in_another_family_keeps_that_familys_glyphs_mid_sentence() {
+        // The path every paragraph takes: one layout over several stretches.
+        // The default family stays named for the rest of the sentence.
+        const MONO: &[u8] = include_bytes!("../tests/fonts/RobotoMono-Regular.ttf");
+        let mut mixed = Shaper::with_faces([
+            (Face::REGULAR, ROBOTO.to_vec()),
+            (Face::ITALIC, MONO.to_vec()),
+        ]);
+        let ids = |glyphs: &[Glyph]| glyphs.iter().map(|g| g.id).collect::<Vec<_>>();
+        let mono_ids = ids(&Shaper::new(MONO.to_vec()).shape("llm").glyphs);
+        let sans_ids = ids(&Shaper::new(ROBOTO.to_vec()).shape("track").glyphs);
+
+        let line = mixed
+            .break_rich(
+                &[
+                    TextRun::new("llm").in_face(Face::ITALIC),
+                    TextRun::new("track"),
+                ],
+                Pt(9.0),
+                Pt(400.0),
+            )
+            .remove(0);
+
+        assert_eq!(line.segments.len(), 2, "{:?}", line.segments);
+        assert_eq!(ids(&line.segments[0].glyphs), mono_ids);
+        assert_eq!(ids(&line.segments[1].glyphs), sans_ids);
     }
 
     #[test]

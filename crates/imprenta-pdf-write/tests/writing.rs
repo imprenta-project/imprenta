@@ -387,3 +387,129 @@ fn compression_changes_the_size_and_not_the_shape() {
     );
     assert_eq!(tounicode(&plain).len(), tounicode(&small).len());
 }
+
+/// The page objects in reading order, as the page tree lists them.
+fn kids(pdf: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(pdf);
+    let start = text.find("/Kids [").expect("no page tree") + 7;
+    let end = start + text[start..].find(']').unwrap();
+    text[start..end]
+        .split(" R")
+        .map(|r| r.trim().trim_end_matches(" 0").to_string())
+        .filter(|r| !r.is_empty())
+        .collect()
+}
+
+fn region() -> Region {
+    Region {
+        x: 40.0,
+        y: 50.0,
+        width: 120.0,
+        height: 12.0,
+    }
+}
+
+#[test]
+fn a_link_to_a_named_place_jumps_to_the_page_it_is_on() {
+    // The table of contents is written before the chapters it points at, and
+    // a page is in the file the moment it is finished. So a link names its
+    // destination, and only at the end — when every page has been written —
+    // does the file say which page that is.
+    let mut writer = Writer::new(readable());
+    {
+        let mut contents = writer.page(595.0, 842.0);
+        contents.link_to(region(), "resumen");
+        contents.finish();
+    }
+    {
+        let mut chapter = writer.page(595.0, 842.0);
+        chapter.destination("resumen", 100.0);
+        chapter.finish();
+    }
+    let pdf = writer.finish().unwrap();
+    let pages = kids(&pdf);
+
+    assert_eq!(
+        count(&pdf, b"/S /GoTo"),
+        1,
+        "the link is not an internal jump"
+    );
+    assert_eq!(count(&pdf, b"/D /resumen"), 1);
+    // A destination's top is measured from the bottom of the page, where the
+    // engine measures from its top.
+    let entry = format!("/resumen [{} 0 R /XYZ 0 742", pages[1]);
+    assert_eq!(
+        count(&pdf, entry.as_bytes()),
+        1,
+        "no destination on the second page"
+    );
+    assert_eq!(
+        count(&pdf, b"/Dests "),
+        1,
+        "the catalogue does not name them"
+    );
+}
+
+#[test]
+fn a_destination_named_twice_keeps_the_first() {
+    let mut writer = Writer::new(readable());
+    for _ in 0..2 {
+        let mut page = writer.page(595.0, 842.0);
+        page.destination("resumen", 0.0);
+        page.finish();
+    }
+    let pdf = writer.finish().unwrap();
+    let pages = kids(&pdf);
+
+    let first = format!("/resumen [{} 0 R", pages[0]);
+    assert_eq!(count(&pdf, b"/resumen ["), 1);
+    assert_eq!(count(&pdf, first.as_bytes()), 1);
+}
+
+#[test]
+fn an_outline_nests_its_entries_by_level_in_the_order_given() {
+    let mut writer = Writer::new(readable());
+    {
+        let mut page = writer.page(595.0, 842.0);
+        for name in ["resumen", "modelos", "anexo"] {
+            page.destination(name, 0.0);
+        }
+        page.finish();
+    }
+    writer.bookmark("Resumen", 1, "resumen");
+    writer.bookmark("Por modelo", 2, "modelos");
+    writer.bookmark("Anexo", 1, "anexo");
+    let pdf = writer.finish().unwrap();
+    let text = String::from_utf8_lossy(&pdf);
+
+    assert_eq!(count(&pdf, b"/Type /Outlines"), 1);
+    assert_eq!(
+        count(&pdf, b"/Outlines "),
+        1,
+        "the catalogue does not name it"
+    );
+    assert_eq!(count(&pdf, b"/PageMode /UseOutlines"), 1);
+    // Three entries in all, and the order the bookmarks were given in.
+    let at = |title: &str| text.find(&format!("/Title ({title})")).expect(title);
+    assert!(at("Resumen") < at("Por modelo") && at("Por modelo") < at("Anexo"));
+    // Two at the top level, the second level under the first of them.
+    let root = &text[text.find("/Type /Outlines").unwrap()..];
+    assert!(
+        root[..root.find(">>").unwrap()].contains("/Count 3"),
+        "{root}"
+    );
+    let resumen = &text[at("Resumen")..];
+    let resumen = &resumen[..resumen.find(">>").unwrap()];
+    assert!(
+        resumen.contains("/First") && resumen.contains("/Count 1"),
+        "{resumen}"
+    );
+}
+
+#[test]
+fn a_document_with_no_destinations_carries_no_trace_of_them() {
+    let pdf = one_page("Prestación", readable());
+
+    assert_eq!(count(&pdf, b"/Dests"), 0);
+    assert_eq!(count(&pdf, b"/Outlines"), 0);
+}

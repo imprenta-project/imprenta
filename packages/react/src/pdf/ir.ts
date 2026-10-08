@@ -3,6 +3,8 @@ export interface Run {
   weight?: 'bold';
   italic?: true;
   color?: string;
+  /** The family its fonts were handed over under. Absent is the default one. */
+  family?: string;
 }
 
 export interface Edges {
