@@ -14,7 +14,7 @@ export interface Finding {
 }
 
 /** Which of the two a component turned out to declare, by what it returned. */
-export type Format = 'pdf' | 'xlsx';
+export type Format = 'pdf' | 'xlsx' | 'escpos';
 
 export interface Report {
   id: string;
@@ -24,6 +24,7 @@ export interface Report {
   bytes: number;
   checks: Finding[];
   ir: unknown;
+  profile?: { columns: number; printableWidth: number; marginLeft: number; dpi: number };
 }
 
 export type View = 'preview' | 'source';

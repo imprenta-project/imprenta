@@ -4,7 +4,7 @@ name: Release
 # waiting.
 #
 #   1. Something lands on main carrying a changeset. This opens (or updates)
-#      a pull request called "chore: version packages" that bumps the five
+#      a pull request called "chore: version packages" that bumps the six
 #      packages and writes their changelogs. Nothing is published.
 #   2. That pull request is merged. This run finds no changesets pending, so it
 #      tags the commit and cuts the GitHub release — which is what `publish.yml`
@@ -86,12 +86,12 @@ jobs:
             exit 0
           fi
 
-          # The five packages are a `fixed` group in .changeset/config.json, so
+          # The six packages are a `fixed` group in .changeset/config.json, so
           # one tag stands for all of them. If they ever drift, that tag is a
           # lie about what the other four contain — and `@imprentajs/cli` shipping
           # against a `@imprentajs/pdf` it was never tested with is the exact
           # failure this repository is careful about.
-          for pkg in packages/pdf packages/xlsx packages/react packages/fonts; do
+          for pkg in packages/pdf packages/xlsx packages/escpos packages/react packages/fonts; do
             PKG_VERSION=$(node -p "require('./$pkg/package.json').version")
             if [[ "$PKG_VERSION" != "$VERSION" ]]; then
               echo "::error::$pkg is at $PKG_VERSION but the release is $VERSION."
@@ -118,15 +118,15 @@ jobs:
             echo
             echo "## Packages"
             echo
-            # Five, and no more. The ten per-platform addon packages this used
+            # Six, and no more. The ten per-platform addon packages this used
             # to promise went with the native addons, but the sentence naming
             # them survived the migration and shipped once — a release note
             # sending people to look for packages that do not exist, on the one
             # page a stranger reads before installing anything.
             echo "\`@imprentajs/cli\`, \`@imprentajs/react\`, \`@imprentajs/fonts\`,"
-            echo "\`@imprentajs/pdf\` and \`@imprentajs/xlsx\` at \`$VERSION\` on npm."
+            echo "\`@imprentajs/pdf\`, \`@imprentajs/xlsx\` and \`@imprentajs/escpos\` at \`$VERSION\` on npm."
             echo
-            echo "Five packages and nothing per-platform: each engine is a single"
+            echo "Six packages and nothing per-platform: each engine is a single"
             echo "WebAssembly module, so one artefact runs wherever Node does —"
             echo "glibc, musl, Alpine, a browser, Deno, Bun or an edge worker."
             echo

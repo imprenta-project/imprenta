@@ -123,7 +123,9 @@ async function run(
     const size =
       document.format === 'xlsx'
         ? `${document.parts} sheet${document.parts === 1 ? '' : 's'}`
-        : `${document.parts}p`;
+        : document.format === 'escpos'
+          ? `${document.parts} ticket${document.parts === 1 ? '' : 's'}`
+          : `${document.parts}p`;
     process.stdout.write(
       `  ${document.checks.length ? '!' : '✓'} ${relative(process.cwd(), document.path ?? '')}` +
         `  ${size}  ${(document.bytes / 1024).toFixed(1)} KB${notes}\n`,

@@ -1,0 +1,17 @@
+[package]
+name = "imprenta-escpos-wasm"
+description = "Imprenta receipt engine as a plain WebAssembly module"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+imprenta-escpos.workspace = true
+serde_json.workspace = true

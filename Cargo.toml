@@ -7,6 +7,8 @@ members = [
     "crates/imprenta-xlsx",
     "crates/imprenta-pdf-wasm",
     "crates/imprenta-xlsx-wasm",
+    "crates/imprenta-escpos",
+    "crates/imprenta-escpos-wasm",
 ]
 
 [workspace.package]
@@ -23,6 +25,7 @@ imprenta-core = { path = "crates/imprenta-core", version = "0.0.0" }
 imprenta-pdf = { path = "crates/imprenta-pdf", version = "0.0.0" }
 imprenta-pdf-write = { path = "crates/imprenta-pdf-write", version = "0.0.0" }
 imprenta-xlsx = { path = "crates/imprenta-xlsx", version = "0.0.0" }
+imprenta-escpos = { path = "crates/imprenta-escpos", version = "0.0.0" }
 
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

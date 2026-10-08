@@ -1,6 +1,6 @@
 name: Publish
 
-# Five packages, one job.
+# Six packages, one job.
 #
 # This file used to be three hundred lines: a matrix compiling two native
 # addons for five targets each, an artifact dance to collect the ten `.node`
@@ -63,7 +63,7 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # Compiles both WebAssembly modules and builds every package that ships
+      # Compiles all WebAssembly modules and builds every package that ships
       # compiled output — `@imprentajs/react`, `@imprentajs/fonts` and the
       # preview UI included.
       - run: pnpm run build
@@ -73,7 +73,7 @@ jobs:
       - name: Refuse to ship a package with no engine in it
         run: |
           set -euo pipefail
-          for pkg in pdf xlsx; do
+          for pkg in pdf xlsx escpos; do
             module="imprenta-$pkg.wasm"
             if ! npm pack --dry-run --json "./packages/$pkg" | grep -q "$module"; then
               echo "::error::packages/$pkg would publish without $module. Check its \`files\`."

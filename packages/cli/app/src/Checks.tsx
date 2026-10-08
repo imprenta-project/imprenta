@@ -24,7 +24,7 @@ export function Checks({
   checks: Finding[];
   counts: { errors: number; warnings: number };
   /** What was checked, since the two lists have nothing in common. */
-  format: 'pdf' | 'xlsx';
+  format: 'pdf' | 'xlsx' | 'escpos';
   open: boolean;
   disabled: boolean;
   onOpenChange(open: boolean): void;
@@ -89,7 +89,9 @@ export function Checks({
                 are fine is how a panel stops being read. */}
             {format === 'xlsx'
               ? 'Nothing to fix. Every number is a number, the formulas point at sheets that exist, and nothing is hidden under a merge.'
-              : 'Nothing to fix. Type is legible, the margins are inside what a printer can reach, and the engine had nothing to report.'}
+              : format === 'escpos'
+                ? 'Nothing to fix. The ticket was encoded for its printer profile without diagnostics.'
+                : 'Nothing to fix. Type is legible, the margins are inside what a printer can reach, and the engine had nothing to report.'}
           </p>
         ) : (
           <ScrollArea className="max-h-[34vh]">

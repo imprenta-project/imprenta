@@ -1,0 +1,19 @@
+[package]
+name = "imprenta-escpos"
+description = "Imprenta receipt layout and native ESC/POS command generation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error = "0.1.20"
+thiserror.workspace = true
+escpos = { version = "=0.17.0", default-features = false, features = ["barcodes", "codes_2d"] }
+yore = "2.1.1"
+unicode-normalization = "0.1.24"
+image = { version = "=0.25.5", default-features = false, features = ["png", "jpeg"] }

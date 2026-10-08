@@ -11,6 +11,7 @@
     [
       "@imprentajs/pdf",
       "@imprentajs/xlsx",
+      "@imprentajs/escpos",
       "@imprentajs/react",
       "@imprentajs/fonts",
       "@imprentajs/cli"

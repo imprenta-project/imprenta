@@ -3,10 +3,12 @@ import { readFile, stat } from 'node:fs/promises';
 import { createServer as createHttpServer, type ServerResponse } from 'node:http';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { ResolvedProfile } from '@imprentajs/escpos';
 import { createServer, type ViteDevServer } from 'vite';
 import { type Context, check } from './checks.js';
 import type { Loaded } from './config.js';
 import { type Found, findDocuments, previewProps } from './documents.js';
+import { receiptChecks } from './receipts.js';
 import { checkWorkbook, refuse } from './sheets.js';
 
 /**
@@ -82,7 +84,7 @@ function api(loaded: Loaded) {
 
   // The last render, kept so that asking for the report and then the bytes
   // does not render twice. One entry: the preview shows one document.
-  let last: { id: string; bytes: Buffer } | null = null;
+  let last: { bytes: Buffer; report: Report } | null = null;
 
   return {
     name: 'imprenta:preview',
@@ -108,7 +110,7 @@ function api(loaded: Loaded) {
           if (url.pathname === '/api/render') {
             const id = url.searchParams.get('id') ?? '';
             const done = await render(server, loaded, await load(), id);
-            last = { id, bytes: done.bytes };
+            last = done;
             return json(res, done.report);
           }
           if (url.pathname === '/api/image') {
@@ -129,16 +131,26 @@ function api(loaded: Loaded) {
           if (url.pathname === '/api/file') {
             const id = url.searchParams.get('id') ?? '';
             const done =
-              last?.id === id && url.searchParams.has('cached')
-                ? null
+              last?.report.id === id && url.searchParams.has('cached')
+                ? last
                 : await render(server, loaded, await load(), id);
-            const format = (url.searchParams.get('format') ?? 'pdf') as 'pdf' | 'xlsx';
-            return send(
-              res,
-              id,
-              done?.bytes ?? (last?.bytes as Buffer),
-              done?.report.format ?? format,
-            );
+            return send(res, id, done.bytes, done.report.format);
+          }
+          if (url.pathname === '/api/preview') {
+            const id = url.searchParams.get('id') ?? '';
+            const done =
+              last?.report.id === id && url.searchParams.has('cached')
+                ? last
+                : await render(server, loaded, await load(), id);
+            if (done.report.format !== 'escpos' || !done.report.profile) {
+              res.statusCode = 400;
+              return res.end('this endpoint previews ESC/POS tickets');
+            }
+            const { preview } = await import('@imprentajs/escpos/preview');
+            const svg = await preview(done.bytes, done.report.profile);
+            res.setHeader('content-type', 'image/svg+xml; charset=utf-8');
+            res.setHeader('cache-control', 'no-store');
+            return res.end(svg);
           }
           res.statusCode = 404;
           res.end('no such endpoint');
@@ -341,7 +353,8 @@ async function listing(loaded: Loaded) {
 interface Report {
   id: string;
   /** Which of the two the component turned out to declare. */
-  format: 'pdf' | 'xlsx';
+  format: 'pdf' | 'xlsx' | 'escpos';
+  profile?: ResolvedProfile;
   /** Pages, for a document. Sheets, for a workbook. */
   parts: number;
   bytes: number;
@@ -389,6 +402,23 @@ async function render(
 
   // Which format it is is only knowable once the component has run.
   const rendered = await renderAny(createElement(Component, previewProps(Component)));
+
+  if (rendered.format === 'escpos') {
+    const { render } = await import('@imprentajs/escpos');
+    const out = await render(rendered.ir, { images: assets.images });
+    return {
+      bytes: Buffer.from(out.escpos),
+      report: {
+        id,
+        format: 'escpos',
+        parts: out.tickets,
+        bytes: out.bytes,
+        checks: receiptChecks(out),
+        ir: rendered.ir,
+        profile: out.profile,
+      },
+    };
+  }
 
   if (rendered.format === 'xlsx') {
     // Before the write, not after: `missing-image` is a fault the engine
@@ -458,13 +488,14 @@ function kind(data: Buffer): string {
 const TYPES = {
   pdf: 'application/pdf',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  escpos: 'application/octet-stream',
 } as const;
 
 function send(
   res: import('node:http').ServerResponse,
   id: string,
   bytes: Buffer,
-  format: 'pdf' | 'xlsx',
+  format: 'pdf' | 'xlsx' | 'escpos',
 ) {
   res.statusCode = 200;
   res.setHeader('content-type', TYPES[format]);

@@ -73,9 +73,12 @@ export function App() {
       setReport(shown);
       // Fetched as bytes rather than pointed at, so the viewer shows what was
       // just rendered instead of what it already had.
-      const bytes = await fetch(
-        `/api/file?id=${encodeURIComponent(id)}&format=${shown.format}&cached=1&v=${at}`,
-      );
+      const endpoint = shown.format === 'escpos' ? 'preview' : 'file';
+      const bytes = await fetch(`/api/${endpoint}?id=${encodeURIComponent(id)}&cached=1&v=${at}`);
+      if (!bytes.ok) {
+        const failure = await bytes.text();
+        throw new Error(failure);
+      }
       const blob = await bytes.blob();
       setRendered((old) => {
         if (old) URL.revokeObjectURL(old.url);
@@ -153,6 +156,24 @@ export function App() {
                         file={file}
                         name={selected?.split('/').pop() ?? 'workbook'}
                       />
+                    ) : report?.format === 'escpos' ? (
+                      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                        <p className="border-b bg-sidebar px-4 py-2 text-xs text-muted-foreground">
+                          Preview of the printer commands. Device fonts and physical print quality
+                          can vary.
+                        </p>
+                        <div className="min-h-0 flex-1 overflow-auto p-5">
+                          {file ? (
+                            <img
+                              src={file}
+                              alt={`Ticket ${selected ?? ''}`}
+                              className="mx-auto block max-w-full bg-white shadow-md"
+                            />
+                          ) : (
+                            <Spinner aria-label="Rendering" />
+                          )}
+                        </div>
+                      </div>
                     ) : (
                       // `container-type: size` is what makes `fit()` work: it
                       // turns this pane into the frame of reference for the

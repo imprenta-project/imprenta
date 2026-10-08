@@ -1,0 +1,56 @@
+{
+  "name": "@imprentajs/escpos",
+  "version": "0.1.0-alpha.11",
+  "description": "Compose purchase receipts into native ESC/POS printer commands.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/imprenta-project/imprenta.git",
+    "directory": "packages/escpos"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./preview": {
+      "types": "./dist/preview.d.ts",
+      "default": "./dist/preview.js"
+    },
+    "./engine": {
+      "types": "./dist/engine.d.ts",
+      "default": "./dist/engine.js"
+    },
+    "./imprenta-escpos.wasm": "./imprenta-escpos.wasm"
+  },
+  "files": [
+    "dist",
+    "imprenta-escpos.wasm"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs && tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "check-types": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "clean": "rm -rf dist imprenta-escpos.wasm"
+  },
+  "dependencies": {
+    "@point-of-sale/receipt-printer-renderer": "1.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
