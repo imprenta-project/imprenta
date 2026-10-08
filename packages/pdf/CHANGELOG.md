@@ -1,5 +1,143 @@
 # @imprentajs/pdf
 
+## 0.1.0-alpha.12
+
+### Patch Changes
+
+- [`2536558`](https://github.com/imprenta-project/imprenta/commit/2536558d3a6518ad2648582ee51b6fac27aefac2) Thanks [@AbianS](https://github.com/AbianS)! - Layout fixes found building a long report.
+
+  - **A heading with room under it no longer strands at the foot of a page.**
+    The space after a block is an atom of its own, and it was emitted without
+    the block's `keepWithNext` — so the chain ended at the gap, the heading and
+    its gap fitted at the foot of the page, and the table it introduced went
+    overleaf without it. Any `keepWithNext` with a `spaceAfter` did this.
+  - **A growing spacer pushes everything after it to the foot, not just the next
+    line.** A signature and a date after one: the gap left room for the first
+    only, and the date went onto a page of its own. It now leaves room for
+    everything up to the next forced break, and takes nothing when that does
+    not fit on the page. The look-ahead stops at the foot of the page, so it
+    costs at most a page of arithmetic and only where something grows.
+  - **A block taller than a whole page is reported** as `page-overflow`. It
+    cannot be split and was painted past the foot without a word.
+  - **A list can sit inside a box.** It was refused as `not-inline`.
+  - **A canvas can paint in more than one colour.** `{ "op": "fill", "color" }`
+    and `{ "op": "stroke", "color", "width" }` paint the path traced since the
+    previous one and start another, so a chart's series, grid and axes share one
+    canvas. A canvas without them paints as it always did.
+
+  Measured against the previous release on the ledger, prose and text-path
+  benchmarks: no change outside run-to-run noise.
+
+- [`2536558`](https://github.com/imprenta-project/imprenta/commit/2536558d3a6518ad2648582ee51b6fac27aefac2) Thanks [@AbianS](https://github.com/AbianS)! - A second typeface, and the end of letters set in one font and drawn in
+  another.
+
+  A face could only be told apart by weight and slant. Handing a monospaced
+  font over as, say, the italic face looked like it worked and printed the wrong
+  letters: every layout asked for the family of the first font registered, so the
+  text was shaped in that font and drawn with the other one's file. Nothing said
+  so. Each face is now shaped in its own family, and the shaper settles on the
+  face it really used before anything is shaped, so the glyphs and the font they
+  are drawn with always agree.
+
+  On top of that, a family can be named:
+
+  ```rust
+  Assets::new()
+      .with_font(Face::REGULAR, geist)
+      .with_font(Face::family("mono"), geist_mono)
+      .with_font(Face::family("mono").bold(), geist_mono_semibold)
+  ```
+
+  ```json
+  { "text": "llm", "family": "mono", "weight": "bold" }
+  ```
+
+  `family` on a run and on a table cell; `<Text family="mono">` and
+  `<Span family="mono">` in React, with `family=""` back to the default inside
+  a mono paragraph. Fonts are handed over with `family` in `render(ir, { fonts })`,
+  with `name` in `google('Roboto Mono', { name: 'mono' })` and in a CLI config's
+  font list — `name`, because `family` there already means Google's family.
+
+  A family nobody handed over is reported as `unknown-family` and set in the
+  default one. A face a family lacks — bold mono when only regular mono was
+  given — is set in that family's regular, and the CLI's `missing-face` check
+  now looks for it in the family the run names.
+
+- [`2536558`](https://github.com/imprenta-project/imprenta/commit/2536558d3a6518ad2648582ee51b6fac27aefac2) Thanks [@AbianS](https://github.com/AbianS)! - Fix: a word with a ligature in it copied out of the PDF with a letter missing.
+
+  Roboto sets "fi" as one glyph, and the glyph was recorded as standing for the
+  "f" alone. The page looked right; selecting "fin" gave "fn", a search for
+  "fiscal" or "configuración" found nothing, and a screen reader skipped the
+  letter — on every page of every document set in a font with ligatures. The
+  letters a ligature swallows are now part of the text its glyph stands for, in
+  either direction of writing.
+
+- [`2536558`](https://github.com/imprenta-project/imprenta/commit/2536558d3a6518ad2648582ee51b6fac27aefac2) Thanks [@AbianS](https://github.com/AbianS)! - Sections: pages of their own, with their own size, margins, bands and
+  numbering.
+
+  A report's cover has no header, no footer and wider margins, and its body is
+  numbered from one. A document had one page setup and one pair of bands for
+  every page, so the only way to get there was two documents stitched together,
+  with the body's page numbers unable to know the cover existed.
+
+  `{ "t": "section", "page": {…}, "header": null, "footer": null, "numbering":
+"none", "children": […] }` — `<Section footer={false} numbering="none">` in
+  React. A section starts on a new page and the document's own settings resume
+  on a new page after it. Everything it leaves out is the document's: a page
+  field it does not name, a band it does not mention. `null` (or `false`) takes
+  a band away, and a `<Header>` or `<Footer>` written inside the section is its
+  own. `numbering` is `"continue"`, `"none"` — the pages carry no number and
+  `{{pages}}` does not count them — or `{ "restart": 1 }`.
+
+  A section drains what is in hand before it switches page, painted with the
+  bands it was laid out under, so pages of two sizes are never confused and a
+  section fed through a `Session` is byte for byte the section declared whole.
+  The CLI's checks walk into sections and judge their margins and widths against
+  the section's own page.
+
+  Also fixed on the way: a parity break (`pageBreak` to `odd` or `even`) counted
+  pages from the first one still held in memory rather than from the start of
+  the document, so on any document long enough to release pages a chapter meant
+  for the recto could open on the verso.
+
+- [`2536558`](https://github.com/imprenta-project/imprenta/commit/2536558d3a6518ad2648582ee51b6fac27aefac2) Thanks [@AbianS](https://github.com/AbianS)! - Anchors, links inside the document, an outline, and `{{pageof:id}}`.
+
+  A table of contents needs to know which page each chapter lands on, and it is
+  printed before any of them. There was no way to ask, so a producer laid each
+  chapter out on its own to count its pages and then laid out the whole body
+  again — twice the work, and exact only because every chapter happened to open
+  a page.
+
+  - `{ "t": "anchor", "id": "resumen", "bookmark": "Resumen ejecutivo", "level": 1 }`
+    names the place where what follows it lands. It takes no room and keeps
+    with the next thing, so it never names the foot of the page before.
+    `<Anchor id bookmark level />` in React.
+  - A `link` whose `href` is `#resumen` jumps there. Written as a named
+    destination resolved once at the end of the file, because the contents page
+    is written long before the chapter it points at and a page is in the file
+    the moment it closes.
+  - A `bookmark` puts the anchor in the outline a PDF reader shows beside the
+    pages, nested by `level`; a document with one opens with it showing.
+  - `{{pageof:resumen}}` — `<PageOf id="resumen" />` — prints the number of the
+    page the anchor landed on, in body text, table cells, list items and bands.
+    It is the number the page carries: behind an unnumbered cover, the first
+    page of the body is 1.
+
+  A document that prints a page reference is walked twice, as one that prints
+  `{{pages}}` already was: once to count, painting nothing, then once to paint.
+  The number printed can be a different width from the one counted with, and a
+  line that rewraps can move what follows it to another page, so the painted
+  document is checked against the count and painted again in the rare case it
+  moved. A document that uses no reference pays nothing at all — not even a scan
+  of its rows beyond looking for the token.
+
+  Every mistake is said out loud: a link or a reference to an anchor nobody
+  declared is `unknown-anchor`, a name given twice is `duplicate-anchor`, a
+  reference to a page that carries no number is `unnumbered-page`, and a
+  reference in a document fed in pieces — which has no second walk to answer it
+  with — is `page-reference-unavailable` rather than a wrong number. The CLI no
+  longer calls a `#name` link one a reader cannot follow.
+
 ## 0.1.0-alpha.11
 
 ### Patch Changes
