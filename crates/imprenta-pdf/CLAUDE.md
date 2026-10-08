@@ -21,6 +21,7 @@ not do.
 | `build` | walks the IR, measures, feeds the composer. Knows both sides |
 | `session` | the same, fed in chunks instead of declared whole |
 | `table`, `list`, `widows`, `decoration`, `image`, `parallel` | mechanism |
+| `reading` | tests only: the words each page of a written file says, through its `ToUnicode` maps |
 
 ## The rules that keep this fast
 
@@ -55,6 +56,14 @@ document is then painted as `resuming(1, total, …)`, a fragment that happens t
 be the whole of itself. A fed document has no second walk of its own, so
 `Session` keeps the pieces it was given; a row is a few hundred bytes where the
 page it lands on is six kilobytes. Do not add a second silent exception.
+
+`{{pageof:id}}` is the same exception, said out loud, and it pays the same way:
+a document that prints a page reference is counted first with a guessed number
+in it, then painted knowing the pages, then **checked** — a printed number of
+another width can rewrap a line and move what follows — and painted again only
+if something moved. A document with no reference never takes the count. A fed
+document has no second walk, so a reference there is reported, not guessed
+(`PageOf::Unanswerable`).
 
 **5. Style is never decided here.**
 There is no styled `Table` and there never will be. A table is column widths,
@@ -110,6 +119,21 @@ page ledger**.
   `plan`) so a fragment cannot disagree with the plan that placed it. A
   declared `height` is a floor. Band height comes out of the content box,
   never the margin.
+- **A section drains before it switches page.** A page laid out for one size
+  must be painted on that size, with the bands it was laid out under, so
+  `Composer::drain_with` releases the last page too — which is only safe
+  because a section's own page break means nothing can reach back across it.
+- **Glyph ranges are walked lazily.** `glyph_ranges` is asked once per glyph
+  run, and a line of a long paragraph is several glyph runs over one parley
+  run. Collecting the whole run's ranges each time was quadratic in the
+  paragraph and cost a ledger a quarter of its render. A ligature's
+  continuation clusters have no glyph and are folded into the glyph that
+  swallowed them, or "fi" copies out as "f".
+- **A face carries its family as a hash.** `Face` is copied into every stretch
+  and is half of every shaping-cache key, so `Family` is eight bytes rather
+  than a string. `Shaper::resolve` settles on a registered face before
+  anything is shaped; shaping in one face and drawing in another is the wrong
+  letters, with no error anywhere.
 - **A page is written the moment it is finished.** `imprenta-pdf-write` puts
   the bytes in the output and keeps one offset; nothing comes back to a page
   later. So a band, a link or a repeated header that was not painted when the
@@ -128,3 +152,7 @@ page ledger**.
   from a debug build is not a number.
 - `examples/*.rs` write real PDFs into `preview/`. Open them. A list marker
   touching its text passes every assertion.
+- **Assert what the page says, not how many operators it has.** A footer
+  saying "1 de 3" and one saying "3 de 1" draw the same operators.
+  `crate::reading::page_texts` reads an uncompressed file back the way a reader
+  copying from it would.

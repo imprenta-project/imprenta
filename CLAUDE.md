@@ -161,9 +161,10 @@ Two rules follow, and most bugs here come from breaking one of them:
   dropped as content arrives, and a painted page is written into the file
   immediately — what survives it is its bytes and one cross-reference entry.
   Memory is flat per page regardless of length. Anything that is not flat must
-  say so out loud; `<PageCount />` is the one that does, because nothing can
-  know how many pages there are until the last one is packed, and it pays for
-  the answer with a second walk rather than by holding the document.
+  say so out loud; `<PageCount />` and `<PageOf />` are the ones that do,
+  because nothing can know how many pages there are, or where a chapter lands,
+  until the last page is packed — and they pay for the answer with a second
+  walk rather than by holding the document.
 
 No HTML, no CSS engine, no browser. The IR is versioned JSON and the engine does
 not know React exists.

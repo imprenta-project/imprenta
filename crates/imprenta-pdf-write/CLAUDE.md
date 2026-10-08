@@ -31,10 +31,17 @@ CID fonts, `ToUnicode` — are not re-derived.
 ## Deliberately absent
 
 No transparency group, blend mode, pattern, shading, clip path, tagged
-structure tree, PDF/A conformance, encryption, outline, or form field. Every
-one of them is a real feature of the format; none is reachable from
-`imprenta-pdf`'s IR. Adding one because it seems useful adds a second thing to
-keep working. **If the IR cannot express it, it does not belong here.**
+structure tree, PDF/A conformance, encryption, or form field. Every one of
+them is a real feature of the format; none is reachable from `imprenta-pdf`'s
+IR. Adding one because it seems useful adds a second thing to keep working.
+**If the IR cannot express it, it does not belong here.**
+
+The outline and links inside the document are here because the IR can say
+them: an `anchor` node names a place, and a `link` to `#name` goes there.
+A link names its destination rather than a page — the table of contents is
+written before the chapters it points at, and a page is in the file the
+moment it closes — and the names are resolved once, at the end, in the
+`/Dests` dictionary.
 
 ## The three things that are easy to get wrong
 
