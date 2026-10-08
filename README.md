@@ -222,9 +222,84 @@ running total comes out wider than the band was measured with is reported as
 `band-overflow`, naming the page and the overrun in points.
 
 `<PageCount />` is the one thing that costs something: nothing can know the
-total until the last page is packed, so a document that prints one is held
-whole. A footer that only numbers its pages pays none of that and still
-streams.
+total until the last page is packed, so a document that prints one is walked
+twice — once to count its pages, painting nothing, then once to paint them. A
+footer that only numbers its pages pays none of that.
+
+### Covers, sections and numbering
+
+```tsx
+<Document>
+  <Footer>
+    <Text>Página <PageNumber /> de <PageCount /></Text>
+  </Footer>
+  <Section footer={false} numbering="none" margin={72}>
+    <Text size={28}>Informe de uso</Text>
+  </Section>
+  <Text>…the body, numbered from one…</Text>
+</Document>
+```
+
+A section is pages of their own: their own size, margins, bands and
+numbering. It starts on a new page, and the document's settings resume on a
+new page after it. Whatever it leaves out is the document's — `footer={false}`
+takes the footer away, a `<Header>` written inside it is its own, and saying
+nothing keeps the document's. `numbering` is `"continue"`, `"none"` (no number,
+and not counted by `<PageCount />`, so the body above reads "Página 1 de 4"
+after a cover) or `{ restart: 1 }`.
+
+### A contents page that links, and an outline
+
+```tsx
+{chapters.map((c) => (
+  <Link key={c.id} href={`#${c.id}`}>
+    <Text>{c.title} · <PageOf id={c.id} /></Text>
+  </Link>
+))}
+
+<PageBreak />
+<Anchor id="resumen" bookmark="Resumen ejecutivo" />
+<Text>Resumen ejecutivo</Text>
+```
+
+`<Anchor>` names the place where what follows it lands; it takes no room and
+moves with the next thing. A link to `#id` jumps there, `<PageOf id>` prints the
+number that page carries, and a `bookmark` puts it in the outline a PDF
+reader shows beside the pages, nested by `level`. In the IR the reference is
+`{{pageof:id}}`, which works in table cells and bands as well.
+
+A contents page comes before what it lists, so a document that prints a page
+reference is walked twice, like one with `<PageCount />`. The printed number
+can be a different width from the one it was counted with, and a line that
+rewraps can move what follows it, so the painted document is checked against
+the count and painted again in the rare case something moved. A link or a
+reference to a name no anchor gave is reported as `unknown-anchor`. A document
+fed in pieces cannot answer a reference — it has no second walk — and says so
+rather than printing a wrong number.
+
+### A second typeface
+
+```tsx
+<Text>
+  <Span family="mono">llm</Span>track
+</Text>
+```
+
+```ts
+await render(ir, {
+  fonts: [
+    { data: sans },
+    { weight: 'bold', data: sansBold },
+    { family: 'mono', data: mono },
+  ],
+});
+```
+
+A run or a table cell names the family it is set in by the name its fonts were
+handed over under; with none, it is the default family. `google('Roboto Mono',
+{ name: 'mono' })` and a CLI config's `{ path, name: 'mono' }` hand a family
+over under a name. A family nobody handed over is reported as `unknown-family`
+and set in the default one, never in another font's glyphs.
 
 ## Printing
 

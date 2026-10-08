@@ -13,3 +13,12 @@ macOS and fail on Linux, which is worse than having no assertion.
 Used for Latin metrics. RTL and CJK test fonts will be added alongside it when
 those code paths get their own tests; they are much larger, so they are not
 vendored before they are needed.
+
+## RobotoMono-Regular.ttf
+
+- Source: <https://github.com/googlefonts/RobotoMono> (`fonts/ttf/RobotoMono-Regular.ttf`)
+- Copyright 2015 The Roboto Mono Project Authors.
+- Licence: **Apache-2.0**.
+
+A second family, so a document that mixes typefaces is tested against one
+whose glyph ids genuinely differ from Roboto's.
